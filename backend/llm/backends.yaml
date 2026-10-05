@@ -1,0 +1,152 @@
+# Which backend serves each pipeline stage. `s2m convert --backend NAME` overrides this with
+# either a single backend (all stages) or a profile (per-stage mapping).
+# Default: qwen3.5:35b-a3b on DashBW's shared Ollama for all stages. The vLLM backends (dashbw, dashbw_122b,
+# dash5000) were set up early on but never used in production.
+stages:
+  # Qwen3.5-35B-A3B for everything: read the Paging deck's dense tables/diagrams correctly where
+  # ministral-3:8b and gemma3:12b misaligned columns (eval/bakeoff.py), and it can see figures while writing.
+  extract: dashbw_qwen35
+  outline: dashbw_qwen35
+  write: dashbw_qwen35
+
+profiles:
+  dashbw_ollama: {extract: dashbw_ministral3, outline: dashbw_qwen3, write: dashbw_qwen3}
+  dashbw_qwen35: {extract: dashbw_qwen35, outline: dashbw_qwen35, write: dashbw_qwen35}
+  dashbw_small: {extract: dashbw_ministral3, outline: dashbw_qwen3, write: dashbw_qwen3}  # if qwen3.5 is unavailable
+
+backends:
+  # Ollama already running on DashBW (shared daemon: loads models on demand, unloads when idle).
+  dashbw_gemma3:                       # vision -> slide extraction
+    kind: ollama
+    host: DashBW                       # reached through an ssh tunnel
+    local_port: 11435
+    model: gemma3:12b
+    vision: true
+    num_ctx: 16384
+    max_concurrency: 4
+
+  dashbw_qwen3:                        # text -> outline + writing
+    kind: ollama
+    host: DashBW
+    local_port: 11435
+    model: qwen3:14b
+    num_ctx: 40960
+    think: false
+    max_concurrency: 4
+
+  # Other models on DashBW's Ollama, for `eval/bakeoff.py` comparisons.
+  dashbw_qwen35:                       # Qwen3.5-35B-A3B: natively multimodal MoE (3B active)
+    kind: ollama
+    host: DashBW
+    local_port: 11435
+    model: qwen3.5:35b-a3b
+    vision: true
+    num_ctx: 65536
+    think: false
+    max_concurrency: 4
+    # Override the Ollama package defaults (temperature 1, presence_penalty 1.5): the presence
+    # penalty makes long technical sections degenerate into run-on word lists (POPL deck, slides 99-108).
+    options: {presence_penalty: 0.0, repeat_penalty: 1.05, top_p: 0.9, top_k: 20}
+
+  dashbw_ministral3:
+    kind: ollama
+    host: DashBW
+    local_port: 11435
+    model: ministral-3:8b
+    vision: true
+    num_ctx: 32768
+    max_concurrency: 4
+
+  dashbw_minicpmv:
+    kind: ollama
+    host: DashBW
+    local_port: 11435
+    model: minicpm-v:latest
+    vision: true
+    num_ctx: 16384
+    max_concurrency: 4
+
+  dashbw_deepseek_r1:                  # reasoning model, text only (slow; for the writing bake-off)
+    kind: ollama
+    host: DashBW
+    local_port: 11435
+    model: deepseek-r1:32b
+    num_ctx: 32768
+    max_concurrency: 2
+
+  # Default: Qwen3.5-35B-A3B (natively multimodal MoE) on ONE RTX PRO 6000, started on demand.
+  dashbw:
+    kind: vllm_remote
+    host: DashBW                       # ssh alias from ~/.ssh/config
+    relay_host: Dash5000               # DashBW's firewall breaks HTTPS; download there, stream over
+    model: Qwen/Qwen3.5-35B-A3B-FP8
+    gpu_mem_gb: 70                     # reserved on the chosen GPU (weights ~35 GB + KV cache)
+    remote_port: 8765
+    local_port: 8765
+    remote_dir: ~/s2m-vllm             # venv, logs, pidfile live here
+    idle_shutdown_min: 15              # remote watchdog kills the server after this much idle time
+    max_concurrency: 32
+    vllm_args: ["--max-model-len", "131072", "--reasoning-parser", "qwen3",
+                "--limit-mm-per-prompt", '{"image": 8}']
+    vision: true                       # writer also sees the figures it explains
+    extra_body:
+      chat_template_kwargs: {enable_thinking: false}
+
+  # Quality tier: 122B-A10B 4-bit fits on one 96 GB card.
+  dashbw_122b:
+    kind: vllm_remote
+    host: DashBW
+    relay_host: Dash5000
+    model: Qwen/Qwen3.5-122B-A10B-GPTQ-Int4
+    gpu_mem_gb: 90
+    remote_port: 8766
+    local_port: 8766
+    remote_dir: ~/s2m-vllm
+    idle_shutdown_min: 15
+    max_concurrency: 16
+    vllm_args: ["--max-model-len", "65536", "--reasoning-parser", "qwen3",
+                "--limit-mm-per-prompt", '{"image": 8}']
+    vision: true
+    extra_body:
+      chat_template_kwargs: {enable_thinking: false}
+
+  # Fallback when DashBW is busy.
+  dash5000:
+    kind: vllm_remote
+    host: Dash5000
+    model: Qwen/Qwen3.5-35B-A3B-GPTQ-Int4
+    gpu_mem_gb: 29
+    remote_port: 8765
+    local_port: 8767
+    remote_dir: ~/s2m-vllm
+    idle_shutdown_min: 15
+    max_concurrency: 8
+    vllm_args: ["--max-model-len", "32768", "--reasoning-parser", "qwen3",
+                "--limit-mm-per-prompt", '{"image": 8}']
+    vision: true
+    extra_body:
+      chat_template_kwargs: {enable_thinking: false}
+
+  # Laptop, offline (Ollama must be running locally with the model pulled).
+  ollama_local:
+    kind: ollama
+    model: qwen3.5:9b
+    num_ctx: 16384
+    max_concurrency: 2
+
+  # Cheap cloud fallbacks (set the env var with your key).
+  openrouter:
+    kind: openai
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    model: qwen/qwen3.5-35b-a3b
+    vision: true
+    max_concurrency: 16
+
+  gemini:
+    kind: openai
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    api_key_env: GEMINI_API_KEY
+    model: gemini-flash-latest
+    vision: true
+    max_concurrency: 16
