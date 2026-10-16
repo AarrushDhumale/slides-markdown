@@ -1,5 +1,7 @@
 # slides → markdown
 
+For the full workflow, architecture and the reasoning behind every framework, see [docs/PROJECT_GUIDE.md](docs/PROJECT_GUIDE.md).
+
 Turns lecture slide PDFs into readable Markdown study docs at three levels:
 **proficient** (revision overview), **learner** (full explanations), **dockey** (explain like I'm five).
 A fourth output, **summary**, is a concise quick-revision version condensed from the learner doc. It has chapter
