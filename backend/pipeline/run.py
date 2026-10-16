@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Callable
@@ -18,6 +19,16 @@ from backend.pipeline.summarize import summarize
 from backend.pipeline.write import write_all
 
 Progress = Callable[[str, int, int], None]  # (stage, done, total)
+
+
+def save_slide_index(chapter: Chapter, slides, extracts) -> None:
+    """extracts.json (what each slide says) + slides.json (its page image), for the web app's
+    slide popovers, quiz and "Explain this" context."""
+    chapter.dir.mkdir(parents=True, exist_ok=True)
+    (chapter.dir / "extracts.json").write_text(json.dumps(
+        {sid: ex.model_dump(mode="json") for sid, ex in extracts.items()}, ensure_ascii=False))
+    (chapter.dir / "slides.json").write_text(json.dumps(
+        {s.id: {"image": str(s.image_path), "duplicate_of": s.duplicate_of} for s in slides}, ensure_ascii=False))
 
 
 def convert_chapter(chapter: Chapter, levels: list[str], backend: str | None = None,
@@ -44,6 +55,7 @@ def convert_chapter(chapter: Chapter, levels: list[str], backend: str | None = N
 
     extract_llm = stage_llm("extract", backend)
     extracts = extract_all(slides, extract_llm, report("extract"))
+    save_slide_index(chapter, slides, extracts)
 
     outline_llm = stage_llm("outline", backend)
     if per_deck:  # one topic outline per deck; never merged across decks

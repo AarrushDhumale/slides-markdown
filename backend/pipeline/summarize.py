@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 from backend.llm.client import LLM
+from backend.llm.usage import BudgetExceeded
 from backend.paths import PROMPTS_DIR
 from backend.pipeline.assemble import degeneration, normalize_section, strip_degenerate
 from backend.pipeline.chapter import Chapter
@@ -82,6 +83,8 @@ def summarize(outline: Outline, learner_sections: list[str], llm: LLM, chapter: 
                 results[i] = learner  # one-line title/repeat notes are already as short as it gets
             else:
                 results[i] = summarize_section(learner, i, llm, chapter, subdir)
+        except BudgetExceeded:  # a spend cap stops the run; never degrade around it
+            raise
         except Exception as e:  # fall back to the learner heading + its bold key terms
             print(f"\n  ! summary of section {i + 1} failed ({type(e).__name__}); using a stub")
             heading = re.match(r"## .*", learner).group(0)
@@ -97,6 +100,8 @@ def summarize(outline: Outline, learner_sections: list[str], llm: LLM, chapter: 
     try:
         content = [r for r, sec in zip(results, outline.sections) if sec.kind == "content"]
         takeaways = chapter_takeaways(content, llm, chapter, subdir)
+    except BudgetExceeded:  # a spend cap stops the run; never degrade around it
+        raise
     except Exception as e:
         print(f"\n  ! chapter takeaways failed ({type(e).__name__}); omitting them")
         takeaways = ""

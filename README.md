@@ -18,7 +18,8 @@ python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 s2m convert lec1.pdf lec2.pdf --chapter "Ch3 Sorting"     # asks which level(s)
 s2m convert lec1.pdf --level all --open
 s2m inbox --level learner      # data/inbox/<chapter folder>/*.pdf, or loose PDFs
-s2m convert x.pdf --backend gemini                         # any backend in backends.yaml
+s2m convert x.pdf --backend dev_free                       # any backend or profile in backends.yaml
+s2m usage                                                  # API tokens and $ this month
 s2m server status | up | down
 ```
 
@@ -76,7 +77,24 @@ Changing the level reruns only step 4. Reordering a chapter's PDFs reruns only s
 ## Backends
 `backend/llm/backends.yaml` maps each stage to a backend. `--backend NAME` overrides it with a single backend or a **profile**, which is a per-stage mapping.
 
-**Default: models in DashBW's shared Ollama**, reached through an `ssh -L` tunnel. Ollama loads models when they're called and unloads them when idle.
+**Default: hosted APIs, two models.** Slide reading uses a vision model; outlining, writing, the fact-check and the
+summary use a text model. Each stage is a fallback **chain**:
+- `extract_chain`: Gemini 2.5 Flash → Qwen3.5-35B-A3B (OpenRouter) → local Ollama;
+- `write_chain`: DeepSeek V3.2 (OpenRouter, text-only: it gets the figure *descriptions*) → Qwen3.5 → local Ollama;
+- `explain_chain` (web "Explain this"): local Ollama → Gemini 3.1 Flash-Lite.
+
+Every backend retries 429s, 5xx and network errors with backoff (honouring `Retry-After`). When one gives up, or has
+no key, the chain switches to the next for the rest of the run. Profiles: `api_pair` (the default), `dev_free` (Gemini
+free tier, $0 but rate-limited), `local` (laptop only), and the DashBW ones below.
+
+**Cost control.** Every call is logged with its tokens and $ to `data/usage.jsonl`; `s2m usage` sums it by backend and job.
+`S2M_MAX_USD_PER_JOB` (default $1) and `S2M_MAX_USD_PER_MONTH` (default $5) stop a run before a paid call that would go
+over; local and free backends are never capped. Roughly 6k input + 1.2k output tokens per slide for learner + summary,
+so about $0.30 per 100 slides with the default pair.
+
+**Campus GPU (DashBW)**, via `--backend dashbw_qwen35` etc.:
+
+Models in DashBW's shared Ollama, reached through an `ssh -L` tunnel. Ollama loads models when they're called and unloads them when idle.
 - Slide reading: `ministral-3:8b`.
 - Grouping and writing: `qwen3:14b`.
 - `--backend dashbw_qwen35` uses Qwen3.5-35B-A3B for everything. It's multimodal, so the writer also sees the figures.
@@ -84,8 +102,9 @@ Changing the level reruns only step 4. Reordering a chapter's PDFs reruns only s
 **On-demand vLLM** (`dashbw`, `dashbw_122b`, `dash5000`): `s2m server setup|up|down`. The server starts on the GPU with the most free memory, and a remote watchdog stops it after 15 idle minutes.
 
 **Other backends:**
-- `ollama_local`: laptop, offline.
-- `openrouter` and `gemini`: cloud, needing `OPENROUTER_API_KEY` or `GEMINI_API_KEY`.
+- `ollama_local`: laptop, offline (`qwen3.5:latest`, 9.7B with vision; fits the 8 GB RTX 5060).
+- Hosted APIs (keys in `.env`, see `.env.example`): `gemini_25_flash`, `gemini_25_flash_lite`, `gemini_flash_lite`,
+  `gemini_free_flash` / `gemini_free_lite` (free-tier key), `deepseek_v32` and `openrouter_qwen35` (OpenRouter).
 
 **Comparing models** on your own slides:
 ```bash
@@ -114,5 +133,33 @@ Results go to `eval/results/<deck>/pNNN.md`, with each slide image next to every
 - `figures/pNNN-fK.png` in `data/cache/<pdf-sha>/` holds each crop exactly as it's embedded.
 - `meta.json` holds each crop's bounding box, source (raster or vector) and image digests.
 
+## Web app
+A NotebookLM-style site (`web/`, Next.js on Vercel): drop PDFs, read the summary first, then learner notes, revision
+sheet, explain-simply version and a quiz; highlight any text or click a figure to have it explained.
+
+```
+Browser ─► Vercel (web/: UI + short API routes) ─► Supabase (Postgres, Storage, Realtime)
+                                                       ▲ pulls jobs, pushes results
+                                       s2m worker (laptop now; Cloud Run later) ─► model APIs / local Ollama
+```
+- **No sign-in yet:** each browser gets an anonymous Supabase user; row-level security keeps its notebooks private.
+  Quotas (`web/lib/limits.ts`) plus the worker's spend caps bound abuse.
+- **Worker:** `s2m worker` claims queued jobs (`claim_job`), runs `convert_chapter` (learner + summary first; other
+  levels on demand), and uploads `<level>.md`, `assets/`, slide images, `extracts.json` and `quiz.json` (parsed from the
+  learner doc). It also answers "Explain this" requests with the local model, streaming into the row. Local work lives in
+  `data/web/notebooks/<id>/`, never `data/chapters/`.
+- **Explain this:** local model first (free, a few seconds); if the worker is offline or busy, the API route answers
+  with Gemini directly. Same prompt either way (`backend/prompts/explain.md`, synced into `web/` by `pnpm sync-prompt`).
+
+**Setup**
+1. Supabase project → SQL editor → run `supabase/migrations/001_init.sql`; Authentication → enable **Anonymous sign-ins**.
+2. Vercel → import the repo, **Root Directory = `web`**, env vars from `web/.env.example`.
+3. Worker: copy `.env.example` to `.env` (API keys, caps, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`), keep Ollama running
+   with `qwen3.5:latest` (`OLLAMA_KEEP_ALIVE=30m`), then `.venv/bin/s2m worker` in tmux.
+
+**Local development:** `supabase start` (Docker) applies the migration and enables anonymous sign-ins from
+`supabase/config.toml`; put its URL and keys in `web/.env.local` and `.env`; `cd web && pnpm dev`.
+
 ## Tests
-`.venv/bin/pytest -q`. These run offline: they use synthetic PDFs and a fake LLM.
+`.venv/bin/pytest -q`. These run offline: they use synthetic PDFs, a fake LLM and an in-memory Supabase.
+`cd web && pnpm test` checks the doc-splitting helpers shared with the worker.

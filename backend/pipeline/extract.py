@@ -13,6 +13,7 @@ from typing import Callable, Literal
 from pydantic import BaseModel, Field
 
 from backend.llm.client import LLM, image_part
+from backend.llm.usage import BudgetExceeded
 from backend.paths import PROMPTS_DIR
 from backend.pipeline.chapter import Slide
 
@@ -140,6 +141,8 @@ def extract_all(slides: list[Slide], llm: LLM,
             slide = futures[fut]
             try:
                 results[slide.id] = fut.result()
+            except BudgetExceeded:  # a spend cap stops the run; never degrade around it
+                raise
             except Exception as e:  # one bad slide (malformed JSON, timeout) must not sink the deck
                 failures.append((slide, e))
             if progress:

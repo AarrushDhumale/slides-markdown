@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 from backend.llm.client import LLM, image_part
+from backend.llm.usage import BudgetExceeded
 from backend.paths import PROMPTS_DIR
 from backend.pipeline.assemble import (check_markdown, degeneration, missing_slides, resolve_asset,
                                        strip_degenerate)
@@ -239,9 +240,13 @@ def write_all(outline: Outline, level: str, extracts: dict[str, SlideExtract], s
                 if review:
                     try:
                         results[i] = review_section(results[i], outline, i, level, extracts, llm, chapter)
+                    except BudgetExceeded:  # a spend cap stops the run; never degrade around it
+                        raise
                     except Exception as e:  # a failed check never costs us the draft
                         print(f"\n  ! section {i + 1}: fact-check failed ({type(e).__name__}); keeping draft")
                 break
+            except BudgetExceeded:  # a spend cap stops the run; never degrade around it
+                raise
             except Exception as e:  # keep the rest of the document even if one section fails
                 if attempt == 2:
                     print(f"\n  ! section {i + 1} '{outline.sections[i].title}' failed twice "

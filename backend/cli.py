@@ -2,6 +2,8 @@
 
   s2m convert a.pdf b.pdf --chapter "Ch3 Sorting" --level learner
   s2m inbox --level all                  # every subfolder of data/inbox = one chapter
+  s2m usage [--month 2026-10]           # API tokens and $ spent, by backend and job
+  s2m worker                             # web app: process queued jobs + "Explain this" requests
   s2m server setup|up|status|down [--backend dashbw]
 """
 
@@ -10,6 +12,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from backend.paths import OUTPUTS as LEVELS
@@ -63,13 +66,20 @@ def print_progress(stage: str, done: int, total: int) -> None:
 
 def run_chapter(chapter, levels, backend, open_result, review=True, per_slide=False, per_deck=False,
                 by_topic=False):
+    from backend.llm import usage
     from backend.pipeline.run import convert_chapter
 
     print(f"== {chapter.name}  ({len(chapter.pdf_paths)} PDF(s), levels: {', '.join(levels)})")
-    outputs = convert_chapter(chapter, levels, backend, print_progress, review=review,
-                              per_slide=per_slide, per_deck=per_deck, by_topic=by_topic)
+    job = f"cli:{chapter.name}:{int(time.time())}"  # S2M_MAX_USD_PER_JOB applies to each chapter
+    usage.set_job(job)
+    try:
+        outputs = convert_chapter(chapter, levels, backend, print_progress, review=review,
+                                  per_slide=per_slide, per_deck=per_deck, by_topic=by_topic)
+    finally:
+        usage.set_job(None)
     for level, path in outputs.items():
         print(f"  {level:<11} -> {path}")
+    print(f"  API cost: ${usage.job_spend(job):.4f}  (this month: ${usage.month_spend():.2f})")
     if open_result and outputs:
         subprocess.Popen(["xdg-open", str(next(iter(outputs.values())))],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -120,7 +130,32 @@ def cmd_server(args):
         remote.stop()
 
 
+def cmd_usage(args):
+    from backend.llm import usage
+
+    s = usage.summary(args.month)
+    print(f"API usage for {s['month']}: ${s['total']:.4f}")
+    for name, b in sorted(s["backends"].items(), key=lambda kv: -kv[1]["usd"]):
+        print(f"  {name:<22} {b['calls']:>6} calls  {b['in']:>10,} in  {b['out']:>9,} out  ${b['usd']:.4f}")
+    if s["jobs"]:
+        print("by job:")
+        for job, usd in sorted(s["jobs"].items(), key=lambda kv: -kv[1])[:20]:
+            print(f"  {job:<50} ${usd:.4f}")
+
+
+def cmd_worker(args):
+    from backend.worker import run_worker
+
+    run_worker(backend=args.backend, once=args.once)
+
+
 def main(argv=None):
+    try:  # API keys and spend caps from .env (see .env.example)
+        from dotenv import load_dotenv
+        from backend.paths import PROJECT_ROOT
+        load_dotenv(PROJECT_ROOT / ".env")
+    except ImportError:
+        pass
     p = argparse.ArgumentParser(prog="s2m", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -151,6 +186,15 @@ def main(argv=None):
     imode.add_argument("--per-slide", action="store_true", help="one section per slide page")
     imode.add_argument("--by-topic", action="store_true", help="small topic sections")
     i.set_defaults(func=cmd_inbox)
+
+    u = sub.add_parser("usage", help="API tokens and spend this month, by backend and job")
+    u.add_argument("--month", help="YYYY-MM (default: this month)")
+    u.set_defaults(func=cmd_usage)
+
+    w = sub.add_parser("worker", help="web app worker: run queued jobs and Explain requests from Supabase")
+    w.add_argument("--backend", help="backend or profile for conversions (default: stages in backends.yaml)")
+    w.add_argument("--once", action="store_true", help="process what is queued, then exit")
+    w.set_defaults(func=cmd_worker)
 
     s = sub.add_parser("server", help="manage the on-demand vLLM server")
     s.add_argument("action", choices=["setup", "up", "status", "down"])
