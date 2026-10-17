@@ -2,14 +2,19 @@
 
 Converts college lecture slide PDFs into readable Markdown study notes, using a self-hosted vision LLM. The user is a student. This file records the state of the project, the decisions behind it, and the traps already hit, so a new session can continue without re-learning them. `README.md` has the user-facing usage; keep both in sync when behaviour changes.
 
-**No git repo.** There is no history to revert to, so "undo" means editing by hand. Before making large changes, offer to `git init` and commit.
+**Git:** `main` is the original commit `f441a43`; the web app, hosted-model layer and topic book live on branch `web-app` (not merged). Commit only when the user asks.
+
+**Resuming?** Read `docs/SESSION_LOG.md` first: current state, what was measured and decided, what is unverified, and the open work list.
 
 ## How the user runs it
 ```bash
 cd /home/aarrush/personal/projects/slides_to_markdown
 .venv/bin/s2m convert data/inbox/toc/*.pdf --chapter "toc" --level learner,summary
 .venv/bin/s2m convert "data/inbox/OS Slides Combined 1-12.pdf" --chapter "os-midsem" --level learner,summary
-.venv/bin/pytest -q          # 43 offline tests (synthetic PDFs + fake LLM, no GPU)
+.venv/bin/pytest -q          # offline tests (synthetic PDFs + fake LLM + in-memory Supabase, no GPU/network)
+.venv/bin/s2m usage          # API spend this month (data/usage.jsonl)
+.venv/bin/s2m worker         # web app worker (needs SUPABASE_URL / SUPABASE_SERVICE_KEY in .env)
+cd web && corepack pnpm@9.15.4 dev|build|typecheck|test   # Next.js app (no npm on this machine)
 ```
 - **Levels:** `proficient` (dense revision), `learner` (main doc), `dockey` (ELI5), `summary` (condensed *from the learner doc*), `all`.
 - **Layout flags:**
@@ -53,12 +58,54 @@ cd /home/aarrush/personal/projects/slides_to_markdown
 
 Caches of generated prose are keyed by the full prompt, the input and `llm.generation_id` (model plus sampling options). Prompt edits therefore invalidate them automatically. They live in `sections*/`, `outline-*.json`, `overlap-*.json` and `chapters.json`.
 
+## Web app (`web/`, `backend/worker.py`, `supabase/migrations/001_init.sql`)
+- **Shape:** Vercel (Next.js 15, Tailwind v4) ↔ Supabase (Postgres + Storage + Realtime) ↔ `s2m worker` (laptop now,
+  Cloud Run later). Vercel never runs the pipeline; the worker only makes outbound calls and *pulls* jobs.
+- **Auth:** anonymous Supabase users (no visible sign-in, user's choice for phase 1); RLS per owner. Writes that need checks
+  (notebooks, uploads, jobs, explain) go through API routes with the service-role key; quotas in `web/lib/limits.ts`.
+- **One flat book per notebook (user's later instruction, Oct 2026):** the worker runs `convert_chapter(by_topic=True)`
+  (`s2m worker --layout topics`, the default): all PDFs merged, **no chapters**, sections by topic, shown as a book
+  (`web/lib/book.ts`, `web/components/reader.tsx`: cover + contents page, one page per topic, prev/next, ← →, scroll
+  toggle). `run.TOPIC_LAYOUT` = `topics.md` prompt, ~5 slides/section, ceiling 80 sections (chapter outlines cap at
+  12), and `outline.fallback_outline` (consecutive slides grouped, never across PDFs) if the outline call fails. This
+  supersedes "don't fragment into many small sections" **for the web app only**; the CLI default is still chapter-wise.
+- **Layout the user asked for:** two panes (sources + Studio action cards left, reader right); Summary is the default view;
+  Learner / Revision (proficient) / Explain simply (dockey) / Quiz are buttons. Quiz = `quiz.json` parsed from the learner
+  doc (`backend/pipeline/quiz.py`), no model call. Slide chips (from `<!-- slides … -->` anchors) open a popover.
+- **Explain this:** highlight text or click a figure/slide → `/api/explain` → cache hit, or an `explain_requests` row the
+  worker answers with the local model (streams `partial_text`), or a direct Gemini stream when the worker is offline/busy.
+  Context is built server-side (`backend/pipeline/explain.py`, mirrored in `web/lib/explain-context.ts`); section index =
+  i-th slide anchor on both sides. `web/lib/explain-prompt.generated.ts` must match `backend/prompts/explain.md`
+  (a test checks; `pnpm sync-prompt`).
+- **Worker files:** `data/web/notebooks/<id>/{pdfs,chapter}`; uploads `outputs/<id>/{<level>.md, assets/, slides/*.webp,
+  slides.json, extracts.json, quiz.json}`. `convert_chapter` now also writes `extracts.json` + `slides.json` into the chapter dir.
+
 ## Infrastructure and models
+- **Default (since Oct 2026): hosted APIs, two models per run, both on OpenRouter.** `stages:` in `backends.yaml` point at
+  `chain` backends: extract = Qwen3.5-35B (OpenRouter, `extract_chain_qwen`) → Gemini 2.5 Flash → `ollama_local`; write =
+  DeepSeek V3.2 (text-only) → Qwen3.5 → `ollama_local`; explain = `ollama_local` → Gemini 3.1 Flash-Lite. Chains fail over
+  stickily (per run) when a member gives up; `model_id`/`generation_id` follow the active member so caches stay keyed by
+  the model that wrote them. Chosen from a live bake-off on the user's slides (`docs/MODEL_COMPARISON.md`): reader accuracy
+  parity with Gemini at ~half the cost ($0.08 vs $0.16 per 100 slides); DeepSeek wrote cleaner notes than Qwen. Measured
+  total ≈ $0.19 per 100 slides (learner + summary). Profiles: `qwen_deepseek` (= default), `api_pair` (Gemini 2.5 Flash
+  reads), `dev_free`, `local`, DashBW ones. `eval/bakeoff.py` has `--stage extract|write` to re-measure.
+- **Spend caps:** every call is logged to `data/usage.jsonl`; `S2M_MAX_USD_PER_JOB` / `S2M_MAX_USD_PER_MONTH` raise
+  `BudgetExceeded`, which the pipeline's broad `except Exception` handlers re-raise (never degrade around a cap).
+- **`kind: openai` backends** now get `options:` (presence_penalty etc.; `repeat_penalty`→`repetition_penalty` via
+  extra_body), our own retry/backoff (SDK retries off), `rpm` pacing, `price`, `free`, `response_format`, and image
+  stripping when `vision: false`. Model ids for Gemini 3.x were not verified against the live API yet.
+- **OpenRouter traps (found Oct 2026 with a live key):** never send `json_schema` to Qwen there (`response_format:
+  json_object`; the schema is already in the prompt); pin fp8 hosts with `provider.order/quantizations` because default
+  routing picked the dearest host and some hosts are fp4; price per slide must come from the usage ledger, not the
+  listing. `extract_slide` rejects a valid-but-empty reading (`is_empty_reading`); `sanitize` drops code lines echoed as
+  bullets (`drop_code_duplicates`). The OpenRouter key lives in `.env` (gitignored); never put keys in `.env.example`.
+- **Laptop model:** `ollama_local` = `qwen3.5:latest` (9.7B, vision, Q4); same presence_penalty override and `think: false`.
+  The 35B doesn't fit (8 GB VRAM, 14 GB RAM).
 - **Machines:**
   - **DashBW** (`ssh DashBW`): 2× RTX PRO 6000 96 GB, shared. Runs everything through its shared **Ollama** daemon, reached via an ssh tunnel to local port 11435.
   - **Dash5000** (`ssh Dash5000`): RTX 5000 32 GB.
   - **Laptop:** RTX 5060 8 GB.
-- **Default model:** `qwen3.5:35b-a3b` (36B MoE, ~3B active, Q4_K_M, vision, 256K context) for all stages. Config is in `backend/llm/backends.yaml`.
+- **DashBW model:** `qwen3.5:35b-a3b` (36B MoE, ~3B active, Q4_K_M, vision, 256K context), `--backend dashbw_qwen35`.
   - It beat gemma3:12b, ministral-3:8b and minicpm-v on dense tables and diagrams (`eval/bakeoff.py`).
   - Fallback profile `dashbw_small`: ministral-3 to read slides, qwen3:14b to write.
 - **Critical sampling setting.** Qwen3.5's Ollama defaults include `presence_penalty 1.5`, which made long sections collapse into word salad. `backends.yaml` overrides it (`presence_penalty 0, repeat_penalty 1.05`). Keep it.
@@ -82,11 +129,12 @@ Caches of generated prose are keyed by the full prompt, the input and `llm.gener
 - `pkill -f "<pattern>"` matches its own shell when the pattern is in the command line. Use `ps -eo pid,args | grep "[b]in/s2m"` and kill by PID.
 - Foreground `sleep` is blocked in this harness. Run long jobs with `run_in_background` and wait for the notification.
 - Big decks take 5–15 minutes. Most reruns are fast because readings and sections are cached.
+- Node here has no npm and no built-in TypeScript: use `corepack pnpm@9.15.4`, and `tsx` for web tests.
+- Supabase CLI isn't installed; a session can download it to its scratchpad (`supabase start` uses `supabase/config.toml`).
 
 ## Known limitations / next steps
-- **Not built yet:**
-  - the planned **web viewer** (FastAPI + React, KaTeX, slide side panel);
-  - **highlight → "explain this better"** (laptop Ollama by default).
+- **Not built yet:** Google sign-in (link to the anonymous user), the Cloud Run worker image and durable cache mirroring
+  to Storage, a slide pane synced to scroll, "retry failed slides" (re-queueing the job does it: finished work is cached).
 - **Accuracy gaps:**
   - Slides that are raw listings (assembly, DWARF) still produce guessy explanations.
   - Topic-overlap detection between decks relies on the model; the writer sometimes ignores "don't re-explain" instructions, which is why pure repeats became deterministic recaps.

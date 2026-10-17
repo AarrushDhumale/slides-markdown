@@ -10,8 +10,9 @@ from pydantic import BaseModel, Field, field_validator
 from pydantic.json_schema import SkipJsonSchema
 
 from backend.llm.client import LLM
+from backend.llm.usage import BudgetExceeded
 from backend.paths import PROMPTS_DIR
-from backend.pipeline.chapter import Chapter, Slide
+from backend.pipeline.chapter import SEP, Chapter, Slide
 from backend.pipeline.extract import SlideExtract
 
 FULL_DETAIL_CHAR_BUDGET = 300_000  # ~75k tokens; above this the outline sees compact extracts
@@ -139,9 +140,26 @@ def split_large_sections(outline: Outline, max_slides: int = MAX_SLIDES_PER_SECT
     return outline
 
 
-def target_sections(n_content_slides: int, per_section: int = 4, minimum: int = 2) -> int:
-    """About one section per `per_section` teaching slides (minimum..12)."""
-    return max(minimum, min(12, round(n_content_slides / per_section)))
+def target_sections(n_content_slides: int, per_section: int = 4, minimum: int = 2, maximum: int = 12) -> int:
+    """About one section per `per_section` teaching slides (minimum..maximum). A chapter tops out at 12
+    sections; a whole book of topics (`maximum` raised) grows with the number of slides."""
+    return max(minimum, min(maximum, round(n_content_slides / per_section)))
+
+
+def fallback_outline(title: str, order: list[str], extracts: dict[str, SlideExtract],
+                     per_section: int) -> Outline:
+    """A deterministic outline for when the model call fails: consecutive teaching slides grouped
+    `per_section` at a time (never across PDFs), each titled after its first slide. `repair` then
+    merges continuations and splits oversized runs, exactly as for a model-made outline."""
+    content = [sid for sid in order if extracts[sid].slide_role not in FILLER_ROLES]
+    runs: list[list[str]] = []
+    for sid in content:
+        if runs and sid.split(SEP)[0] == runs[-1][0].split(SEP)[0] and len(runs[-1]) < per_section:
+            runs[-1].append(sid)
+        else:
+            runs.append([sid])
+    sections = [Section(title=extracts[r[0]].title.strip() or f"Slides {r[0]}", slides=r) for r in runs]
+    return Outline(chapter_title=title, sections=sections, filler=[sid for sid in order if sid not in content])
 
 
 def cap_sections(outline: Outline, order: list[str], max_sections: int,
@@ -197,11 +215,11 @@ def merge_continuations(outline: Outline, order: list[str], extracts: dict[str, 
 def build_outline(chapter: Chapter, slides: list[Slide], extracts: dict[str, SlideExtract],
                   llm: LLM, extract_model: str, cache_name: str = "outline", per_section: int = 4,
                   max_slides: int = MAX_SLIDES_PER_SECTION, min_sections: int = 2,
-                  title_hint: str = "") -> Outline:
-    prompt = (PROMPTS_DIR / "outline.md").read_text()
+                  title_hint: str = "", prompt_file: str = "outline.md", max_sections: int = 12) -> Outline:
+    prompt = (PROMPTS_DIR / prompt_file).read_text()
     order = [s.id for s in slides if s.id in extracts]
     content = [sid for sid in order if extracts[sid].slide_role not in FILLER_ROLES]
-    target = target_sections(len(content), per_section, min_sections)
+    target = target_sections(len(content), per_section, min_sections, max_sections)
     if target == 1 and len(content) <= max_slides and title_hint:
         # small enough to write as one piece: no outline call, no split
         one = Outline(chapter_title=title_hint, sections=[Section(title=title_hint, slides=content or order)],
@@ -227,11 +245,19 @@ def build_outline(chapter: Chapter, slides: list[Slide], extracts: dict[str, Sli
             + f"Aim for about {target} sections (a typical section covers about {per_section} slides; prefer "
               f"fewer, substantial sections over many small ones).\n"
             + f"\nSlides:\n\n{body}")
-    llm.connect()
-    outline = llm.structured(
-        [{"role": "system", "content": prompt}, {"role": "user", "content": user}],
-        Outline, max_tokens=8192,
-    )
+    try:
+        llm.connect()
+        outline = llm.structured(
+            [{"role": "system", "content": prompt}, {"role": "user", "content": user}],
+            Outline, max_tokens=8192,
+        )
+    except BudgetExceeded:
+        raise
+    except Exception as e:  # a long book's outline can overflow a small model; never lose the whole run
+        print(f"\n  ! outline failed ({type(e).__name__}); grouping consecutive slides instead")
+        # not cached: the next run retries the model
+        return repair(fallback_outline(title_hint or chapter.name, order, extracts, per_section),
+                      order, FILLER_ROLES, extracts, target, max_slides)
     outline = repair(outline, order, FILLER_ROLES, extracts, target, max_slides)
     path.write_text(json.dumps({"key": key, "outline": outline.model_dump()}, indent=1, ensure_ascii=False))
     return outline

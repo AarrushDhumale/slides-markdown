@@ -18,6 +18,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from backend.llm.client import LLM
+from backend.llm.usage import BudgetExceeded
 from backend.paths import PROMPTS_DIR
 from backend.pipeline.assemble import anchor
 from backend.pipeline.chapter import SEP, Chapter, Slide, pdf_letter
@@ -62,6 +63,8 @@ def topic_overlaps(chapter: Chapter, letter: str, earlier: list, current: list,
         llm.connect()
         result = llm.structured([{"role": "system", "content": prompt}, {"role": "user", "content": user}],
                                 DeckOverlap, max_tokens=2048)
+    except BudgetExceeded:  # a spend cap stops the run; never degrade around it
+        raise
     except Exception as e:  # overlap hints are an optimisation; never fail the run over them
         print(f"\n  ! topic-overlap check for deck {letter} failed ({type(e).__name__}); skipping it")
         return DeckOverlap()

@@ -1,15 +1,27 @@
 # Which backend serves each pipeline stage. `s2m convert --backend NAME` overrides this with
 # either a single backend (all stages) or a profile (per-stage mapping).
-# Default: qwen3.5:35b-a3b on DashBW's shared Ollama for all stages. The vLLM backends (dashbw, dashbw_122b,
-# dash5000) were set up early on but never used in production.
+#
+# Default: hosted APIs, two models, both on OpenRouter (one key, one bill). Qwen3.5-35B reads the slides
+# (extract); DeepSeek V3.2 does the reasoning + writing (outline, write, review, summary). Measured on this
+# project's own slides (docs/MODEL_COMPARISON.md): the reader costs about half of Gemini 2.5 Flash's per slide
+# with no accuracy difference beyond noise, and DeepSeek's notes were cleaner than Qwen's as a writer.
+# Each stage is a `chain`: on a hard failure (retries exhausted, bad key, unknown model) it switches to the next
+# member for the rest of the run, ending at the laptop's local Ollama so a run can always finish offline.
+# Keys come from .env (see .env.example). Spend caps: S2M_MAX_USD_PER_JOB / S2M_MAX_USD_PER_MONTH.
 stages:
-  # Qwen3.5-35B-A3B for everything: read the Paging deck's dense tables/diagrams correctly where
-  # ministral-3:8b and gemma3:12b misaligned columns (eval/bakeoff.py), and it can see figures while writing.
-  extract: dashbw_qwen35
-  outline: dashbw_qwen35
-  write: dashbw_qwen35
+  extract: extract_chain_qwen
+  outline: write_chain
+  write: write_chain
+  explain: explain_chain     # "Explain this" popover in the web app: local model first
 
 profiles:
+  qwen_deepseek: {extract: extract_chain_qwen, outline: write_chain, write: write_chain, explain: explain_chain}  # = default
+  # Gemini 2.5 Flash reads (needs GEMINI_API_KEY; dearer per slide), DeepSeek writes
+  api_pair: {extract: extract_chain, outline: write_chain, write: write_chain, explain: explain_chain}
+  # $0 while building the UI: Gemini free-tier key for both stages (rate-limited; prompts may be used for training)
+  dev_free: {extract: gemini_free_flash, outline: gemini_free_lite, write: gemini_free_lite, explain: explain_chain}
+  local: {extract: ollama_local, outline: ollama_local, write: ollama_local, explain: ollama_local}
+  # campus GPU (needs the ssh tunnel to DashBW)
   dashbw_ollama: {extract: dashbw_ministral3, outline: dashbw_qwen3, write: dashbw_qwen3}
   dashbw_qwen35: {extract: dashbw_qwen35, outline: dashbw_qwen35, write: dashbw_qwen35}
   dashbw_small: {extract: dashbw_ministral3, outline: dashbw_qwen3, write: dashbw_qwen3}  # if qwen3.5 is unavailable
@@ -127,26 +139,146 @@ backends:
     extra_body:
       chat_template_kwargs: {enable_thinking: false}
 
-  # Laptop, offline (Ollama must be running locally with the model pulled).
+  # Laptop, offline: Qwen3.5 9.7B (vision) fits the RTX 5060's 8 GB. Slow but $0.
   ollama_local:
     kind: ollama
-    model: qwen3.5:9b
+    model: qwen3.5:latest
+    vision: true
     num_ctx: 16384
+    think: false
+    keep_alive: 30m
+    max_concurrency: 1
+    max_output: 4096       # a looping 9B at ~9 tok/s would otherwise burn 11+ min on one slide
+    options: {presence_penalty: 0.0, repeat_penalty: 1.05, top_p: 0.9, top_k: 20}
+
+  # ---------- hosted APIs (kind: openai) ----------
+  # price: [$ per 1M input, $ per 1M output] for the usage ledger and spend caps (OpenRouter's own
+  # reported cost wins when present). rpm: request pacing. Prices checked Oct 2026.
+
+  # Reader (vision): strong document/table OCR. Thinking off, or hidden thinking tokens bill as output.
+  gemini_25_flash:
+    kind: openai
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    api_key_env: GEMINI_API_KEY
+    model: gemini-2.5-flash
+    vision: true
+    price: [0.30, 2.50]
+    rpm: 300
+    max_concurrency: 8
+    extra_body: {reasoning_effort: none}
+
+  gemini_25_flash_lite:
+    kind: openai
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    api_key_env: GEMINI_API_KEY
+    model: gemini-2.5-flash-lite
+    vision: true
+    price: [0.10, 0.40]
+    rpm: 300
+    max_concurrency: 8
+
+  gemini_flash_lite:
+    kind: openai
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    api_key_env: GEMINI_API_KEY
+    model: gemini-3.1-flash-lite
+    vision: true
+    price: [0.25, 1.50]
+    rpm: 300
+    max_concurrency: 8
+    extra_body: {reasoning_effort: none}
+
+  # Free tier (same API, unbilled key): low rate limits, so slow but $0.
+  gemini_free_flash:
+    kind: openai
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    api_key_env: GEMINI_API_KEY
+    model: gemini-2.5-flash
+    vision: true
+    free: true
+    rpm: 9
+    max_concurrency: 2
+    extra_body: {reasoning_effort: none}
+
+  gemini_free_lite:
+    kind: openai
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    api_key_env: GEMINI_API_KEY
+    model: gemini-2.5-flash-lite
+    vision: true
+    free: true
+    rpm: 14
     max_concurrency: 2
 
-  # Cheap cloud fallbacks (set the env var with your key).
-  openrouter:
+  # Gemini 2.5 Flash through OpenRouter (same model as gemini_25_flash): lets one OpenRouter key run the
+  # reader bake-off against Qwen3.5-35B (`eval/bakeoff.py --backends gemini_25_flash_or,openrouter_qwen35`).
+  gemini_25_flash_or:
+    kind: openai
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    model: google/gemini-2.5-flash
+    vision: true
+    price: [0.30, 2.50]
+    rpm: 120
+    max_concurrency: 8
+    extra_body: {reasoning: {enabled: false}, usage: {include: true}, provider: {order: ["Google AI Studio", Google], require_parameters: true}}
+
+  # Writer (text only): strong reasoning + LaTeX, very cheap output. Sees figure *descriptions*, not images.
+  deepseek_v32:
+    kind: openai
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    model: deepseek/deepseek-v3.2
+    vision: false
+    price: [0.28, 0.42]
+    rpm: 120
+    max_concurrency: 8
+    response_format: json_object     # not every DeepSeek host supports json_schema; the schema is in the prompt
+    # Pin fp8 hosts that HONOUR `reasoning: {enabled: false}` (AtlasCloud, Baidu: 0 hidden tokens, ~6 s per short
+    # call). GMICloud is cheaper per token but keeps thinking regardless (~1,000+ hidden tokens billed as output,
+    # 3x slower), so it costs more per answer. Default routing isn't price-first and some hosts are fp4.
+    extra_body:
+      reasoning: {enabled: false}
+      usage: {include: true}
+      provider: {order: [AtlasCloud, Baidu], quantizations: [fp8, bf16, fp16], require_parameters: true}
+
+  # Today's DashBW model, hosted: proven prompts, sees figures. Fallback for both stages.
+  openrouter_qwen35:
     kind: openai
     base_url: https://openrouter.ai/api/v1
     api_key_env: OPENROUTER_API_KEY
     model: qwen/qwen3.5-35b-a3b
     vision: true
-    max_concurrency: 16
+    price: [0.15, 1.00]
+    rpm: 120
+    max_concurrency: 8
+    options: {presence_penalty: 0.0, repeat_penalty: 1.05, top_p: 0.9, top_k: 20}
+    # NOT json_schema: on the host OpenRouter picked by default (SiliconFlow) it made the model answer with
+    # the shortest valid JSON (empty arrays) for a dense slide. json_object keeps the JSON valid and lets the
+    # model fill it; the schema is already spelled out in the prompt. Routing is pinned to the cheapest fp8
+    # hosts: OpenRouter's default picked the *dearest* one ($0.24/$1.80 vs the listed $0.15/$1.00), and fp4
+    # hosts risk OCR quality. Other hosts remain as fallbacks when these are down.
+    response_format: json_object
+    extra_body:
+      reasoning: {enabled: false}
+      usage: {include: true}
+      provider: {order: [DeepInfra, Parasail], quantizations: [fp8, bf16, fp16], require_parameters: true}
 
-  gemini:
-    kind: openai
-    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
-    api_key_env: GEMINI_API_KEY
-    model: gemini-flash-latest
-    vision: true
-    max_concurrency: 16
+  # ---------- per-stage fallback chains ----------
+  # Gemini-first reader (profile `api_pair`)
+  extract_chain:
+    kind: chain
+    members: [gemini_25_flash, openrouter_qwen35, ollama_local]
+
+  # Default reader chain: Qwen3.5-35B first, Gemini then the laptop as backups
+  extract_chain_qwen:
+    kind: chain
+    members: [openrouter_qwen35, gemini_25_flash, ollama_local]
+
+  write_chain:
+    kind: chain
+    members: [deepseek_v32, openrouter_qwen35, ollama_local]
+
+  explain_chain:
+    kind: chain
+    members: [ollama_local, gemini_flash_lite]

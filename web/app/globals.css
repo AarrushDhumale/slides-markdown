@@ -1,0 +1,266 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --bg: #f6f5f1;
+  --surface: #ffffff;
+  --surface-2: #f0eee8;
+  --surface-3: #e8e5dc;
+  --border: #e4e1d8;
+  --border-strong: #d3cfc3;
+  --text: #1d1c19;
+  --muted: #6d695f;
+  --faint: #9c978a;
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-soft: #eef0ff;
+  --accent-text: #3b33c4;
+  --success: #15803d;
+  --success-soft: #e8f6ec;
+  --warning: #b45309;
+  --warning-soft: #fdf3e2;
+  --danger: #b91c1c;
+  --danger-soft: #fdecec;
+  --code-bg: #f3f1ea;
+  --shadow: 0 1px 2px rgb(28 25 20 / 0.05), 0 4px 16px -6px rgb(28 25 20 / 0.08);
+  --shadow-lg: 0 2px 6px rgb(28 25 20 / 0.06), 0 18px 48px -12px rgb(28 25 20 / 0.18);
+  color-scheme: light;
+}
+
+.dark {
+  --bg: #0e0e10;
+  --surface: #161619;
+  --surface-2: #1d1d21;
+  --surface-3: #26262b;
+  --border: #29292f;
+  --border-strong: #37373f;
+  --text: #ececef;
+  --muted: #a0a0aa;
+  --faint: #6f6f79;
+  --accent: #8b8cf9;
+  --accent-hover: #a2a3fb;
+  --accent-soft: #22223f;
+  --accent-text: #c3c4ff;
+  --success: #4ade80;
+  --success-soft: #142a1c;
+  --warning: #fbbf24;
+  --warning-soft: #2c2310;
+  --danger: #f87171;
+  --danger-soft: #2f1517;
+  --code-bg: #1b1b20;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 4px 16px -6px rgb(0 0 0 / 0.5);
+  --shadow-lg: 0 2px 6px rgb(0 0 0 / 0.4), 0 18px 48px -12px rgb(0 0 0 / 0.7);
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-text: var(--accent-text);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+  --font-serif: var(--font-reading), ui-serif, Georgia, serif;
+  --shadow-card: var(--shadow);
+  --shadow-pop: var(--shadow-lg);
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--text);
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+@keyframes shimmer {
+  from { background-position: -400px 0; }
+  to { background-position: 400px 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg, var(--surface-2) 0%, var(--surface-3) 50%, var(--surface-2) 100%);
+  background-size: 800px 100%;
+  animation: shimmer 1.4s linear infinite;
+  border-radius: 8px;
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.rise { animation: rise 0.35s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+
+/* turning a page of the book */
+@keyframes turn-next { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: none; } }
+@keyframes turn-prev { from { opacity: 0; transform: translateX(-20px); } to { opacity: 1; transform: none; } }
+.turn-next { animation: turn-next 0.32s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.turn-prev { animation: turn-prev 0.32s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.book-page .notes > :first-child { margin-top: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .rise, .turn-next, .turn-prev, .skeleton, .caret::after { animation: none; }
+}
+
+@keyframes caret { 50% { opacity: 0; } }
+.caret::after {
+  content: "";
+  display: inline-block;
+  width: 0.45em;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: -0.12em;
+  background: var(--accent);
+  border-radius: 1px;
+  animation: caret 1s steps(1) infinite;
+}
+
+/* ---------- reading typography (generated notes) ---------- */
+.notes {
+  font-family: var(--font-serif);
+  font-size: 1.075rem;
+  line-height: 1.75;
+  color: var(--text);
+}
+.notes > * + * { margin-top: 1em; }
+.notes h1 {
+  font-family: var(--font-sans);
+  font-size: 2.1rem;
+  line-height: 1.15;
+  font-weight: 650;
+  letter-spacing: -0.025em;
+  margin-bottom: 0.4em;
+}
+.notes h2 {
+  font-family: var(--font-sans);
+  font-size: 1.55rem;
+  line-height: 1.25;
+  font-weight: 640;
+  letter-spacing: -0.018em;
+  margin-top: 2.2em;
+  scroll-margin-top: 84px;
+}
+.notes h3 {
+  font-family: var(--font-sans);
+  font-size: 1.2rem;
+  font-weight: 620;
+  letter-spacing: -0.01em;
+  margin-top: 1.8em;
+  scroll-margin-top: 84px;
+}
+.notes h4, .notes h5, .notes h6 {
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  font-weight: 620;
+  margin-top: 1.5em;
+  color: var(--text);
+}
+.notes p { text-wrap: pretty; }
+.notes a { color: var(--accent-text); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent) 35%, transparent); text-underline-offset: 3px; }
+.notes strong { font-weight: 650; }
+.notes ul, .notes ol { padding-left: 1.4em; }
+.notes ul { list-style: disc; }
+.notes ol { list-style: decimal; }
+.notes li + li { margin-top: 0.35em; }
+.notes li::marker { color: var(--faint); }
+.notes hr { border: 0; border-top: 1px solid var(--border); margin: 2.5em 0; }
+.notes blockquote {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  padding: 0.8em 1.1em;
+  border-radius: 0 10px 10px 0;
+  font-size: 0.97em;
+}
+.notes blockquote > * + * { margin-top: 0.6em; }
+.notes code {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.1em 0.35em;
+}
+.notes pre {
+  font-size: 0.86rem;
+  line-height: 1.6;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1em 1.2em;
+  overflow-x: auto;
+}
+.notes pre code { background: none; border: 0; padding: 0; font-size: inherit; }
+.notes table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+.notes th, .notes td { border: 1px solid var(--border); padding: 0.45em 0.75em; text-align: left; vertical-align: top; }
+.notes th { background: var(--surface-2); font-weight: 600; }
+.notes img {
+  max-width: 100%;
+  margin: 0.5em auto;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: white;
+}
+.notes details {
+  font-family: var(--font-sans);
+  font-size: 0.95rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-2);
+  padding: 0.6em 1em;
+}
+.notes details > summary { cursor: pointer; font-weight: 600; color: var(--accent-text); list-style: none; }
+.notes details > summary::-webkit-details-marker { display: none; }
+.notes details > summary::before { content: "▸"; display: inline-block; margin-right: 0.45em; transition: transform 0.15s; }
+.notes details[open] > summary::before { transform: rotate(90deg); }
+.notes details[open] > summary { margin-bottom: 0.5em; }
+.notes .katex-display { overflow-x: auto; overflow-y: hidden; padding: 0.3em 0; }
+
+/* compact variant for the Explain popover */
+.notes.notes-compact { font-family: var(--font-sans); font-size: 0.92rem; line-height: 1.62; }
+.notes.notes-compact > * + * { margin-top: 0.6em; }
+
+/* highlight.js tokens */
+.hljs-keyword, .hljs-selector-tag, .hljs-built_in { color: #7c3aed; }
+.hljs-string, .hljs-attr { color: #0f766e; }
+.hljs-number, .hljs-literal { color: #b45309; }
+.hljs-comment { color: var(--faint); font-style: italic; }
+.hljs-title, .hljs-function { color: #2563eb; }
+.dark .hljs-keyword, .dark .hljs-selector-tag, .dark .hljs-built_in { color: #c4b5fd; }
+.dark .hljs-string, .dark .hljs-attr { color: #5eead4; }
+.dark .hljs-number, .dark .hljs-literal { color: #fcd34d; }
+.dark .hljs-title, .dark .hljs-function { color: #93c5fd; }
+
+@media print {
+  header, aside, .no-print { display: none !important; }
+  body, html { background: white; color: black; }
+  .notes { font-size: 11pt; }
+  .notes details { border: 0; padding: 0; background: none; }
+}

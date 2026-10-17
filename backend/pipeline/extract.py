@@ -13,6 +13,7 @@ from typing import Callable, Literal
 from pydantic import BaseModel, Field
 
 from backend.llm.client import LLM, image_part
+from backend.llm.usage import BudgetExceeded
 from backend.paths import PROMPTS_DIR
 from backend.pipeline.chapter import Slide
 
@@ -91,14 +92,42 @@ def _messages(slide: Slide, system_prompt: str) -> list[dict]:
     return [{"role": "system", "content": system_prompt}, {"role": "user", "content": content}]
 
 
+TEACHING_ROLES_EXEMPT = ("title", "agenda", "filler", "references")
+
+
+def is_empty_reading(ex: SlideExtract, slide: Slide) -> bool:
+    """Valid JSON with nothing in it for a slide that visibly has text: the model gave up (a constrained-
+    decoding host can answer with empty arrays). A title or filler slide may legitimately be nearly empty."""
+    nothing = not (ex.bullets or ex.equations or ex.code or ex.tables or ex.figures)
+    return nothing and ex.slide_role not in TEACHING_ROLES_EXEMPT and len((slide.text or "").split()) >= 8
+
+
 def extract_slide(slide: Slide, llm: LLM, system_prompt: str) -> SlideExtract:
     path = _cache_path(slide, llm)
     if path.exists():
         return SlideExtract.model_validate_json(path.read_text())
     result = sanitize(llm.structured(_messages(slide, system_prompt), SlideExtract, max_tokens=6144), slide)
+    if is_empty_reading(result, slide):  # never cached: extract_all falls back to the slide's text layer
+        raise ValueError(f"{llm.model_id} returned an empty reading for {slide.id} ({len(slide.text.split())} words of text)")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(result.model_dump_json(indent=1))
     return result
+
+
+def _squash(text: str) -> str:
+    return re.sub(r"\s+", "", text.lstrip("-*• \t"))
+
+
+def drop_code_duplicates(bullets: list[str], code: list) -> tuple[list[str], list]:
+    """Some models transcribe a code/assembly slide twice: every line as a bullet *and* as a code block (and
+    tag lone inline words such as `eval` as one-line code blocks). Keep the code block, drop the echoes."""
+    whole = "".join(_squash(c.code) for c in code)
+    if whole:
+        bullets = [b for b in bullets if len(_squash(b)) < 6 or _squash(b) not in whole]
+    if bullets:  # inline `identifier` mentions are already in the prose bullets
+        code = [c for c in code if not (len(c.code.strip().splitlines()) == 1 and len(c.code.strip()) <= 20
+                                        and not re.search(r"\s", c.code.strip()))]
+    return bullets, code
 
 
 META_BULLET_RE = re.compile(r"^(-\s*)?(this|the) (slide|diagram|figure|image) (shows|illustrates|depicts|"
@@ -116,6 +145,7 @@ def sanitize(ex: SlideExtract, slide: Slide) -> SlideExtract:
     ex.bullets += [f"- {e.replace('$', '')}" for e in defs]
     ex.tables = [t.strip() for t in ex.tables if t.strip().count("|") >= 2]
     ex.code = [c for c in ex.code if c.code.strip()]
+    ex.bullets, ex.code = drop_code_duplicates(ex.bullets, ex.code)
     ex.key_terms = [k.strip() for k in ex.key_terms if k.strip()]
     valid = {c.id for c in slide.figures}
     for fig in ex.figures:
@@ -140,6 +170,8 @@ def extract_all(slides: list[Slide], llm: LLM,
             slide = futures[fut]
             try:
                 results[slide.id] = fut.result()
+            except BudgetExceeded:  # a spend cap stops the run; never degrade around it
+                raise
             except Exception as e:  # one bad slide (malformed JSON, timeout) must not sink the deck
                 failures.append((slide, e))
             if progress:

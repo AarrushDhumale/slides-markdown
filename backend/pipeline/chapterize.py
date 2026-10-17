@@ -15,6 +15,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from backend.llm.client import LLM
+from backend.llm.usage import BudgetExceeded
 from backend.paths import PROMPTS_DIR
 from backend.pipeline.chapter import SEP, Chapter, Slide
 from backend.pipeline.extract import SlideExtract
@@ -149,6 +150,8 @@ def detect_chapters(chapter: Chapter, slides: list[Slide], extracts: dict[str, S
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps({"key": key, "chapters": [c.model_dump() for c in starts]},
                                        indent=1, ensure_ascii=False))
+        except BudgetExceeded:  # a spend cap stops the run; never degrade around it
+            raise
         except Exception as e:  # fall back to one chapter per PDF
             print(f"\n  ! chapter detection failed ({type(e).__name__}); using one chapter per PDF")
             starts = [ChapterStart(title=s.pdf.title, first_slide=s.id) for s in slides if s.page == 1]
