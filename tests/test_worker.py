@@ -88,7 +88,10 @@ def test_job_end_to_end(web):
     levels = {d["level"] for d in db.tables["documents"]}
     assert levels == {"summary", "learner", "quiz"}
     # local work stays under data/web, never data/chapters
-    assert (worker_mod.WEB_DIR / nb / "chapter" / "summary.md").exists()
+    assert (worker_mod.WEB_DIR / nb / "chapter" / "summary-by-topic.md").exists()
+    # one flat book of topics: several slide anchors, no chapter headings, a quiz per topic
+    book = db.storage[("outputs", f"{nb}/learner.md")].decode()
+    assert book.count("<!-- slides ") >= 2 and "## Chapter" not in book
 
 
 def test_job_failure_is_reported(web, monkeypatch):

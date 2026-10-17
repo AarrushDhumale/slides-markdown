@@ -113,6 +113,16 @@ body {
 }
 .rise { animation: rise 0.35s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
 
+/* turning a page of the book */
+@keyframes turn-next { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: none; } }
+@keyframes turn-prev { from { opacity: 0; transform: translateX(-20px); } to { opacity: 1; transform: none; } }
+.turn-next { animation: turn-next 0.32s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.turn-prev { animation: turn-prev 0.32s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.book-page .notes > :first-child { margin-top: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .rise, .turn-next, .turn-prev, .skeleton, .caret::after { animation: none; }
+}
+
 @keyframes caret { 50% { opacity: 0; } }
 .caret::after {
   content: "";

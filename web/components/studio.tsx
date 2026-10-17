@@ -23,7 +23,7 @@ const STAGES: Record<string, string> = {
   requeued: "Waiting to resume",
   ingest: "Reading the PDFs",
   extract: "Reading slides",
-  outline: "Planning chapters",
+  outline: "Grouping slides into topics",
   "write:learner": "Writing learner notes",
   "write:proficient": "Writing the revision sheet",
   "write:dockey": "Writing the simple version",

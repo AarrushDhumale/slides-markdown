@@ -61,6 +61,12 @@ Caches of generated prose are keyed by the full prompt, the input and `llm.gener
   Cloud Run later). Vercel never runs the pipeline; the worker only makes outbound calls and *pulls* jobs.
 - **Auth:** anonymous Supabase users (no visible sign-in, user's choice for phase 1); RLS per owner. Writes that need checks
   (notebooks, uploads, jobs, explain) go through API routes with the service-role key; quotas in `web/lib/limits.ts`.
+- **One flat book per notebook (user's later instruction, Oct 2026):** the worker runs `convert_chapter(by_topic=True)`
+  (`s2m worker --layout topics`, the default): all PDFs merged, **no chapters**, sections by topic, shown as a book
+  (`web/lib/book.ts`, `web/components/reader.tsx`: cover + contents page, one page per topic, prev/next, ← →, scroll
+  toggle). `run.TOPIC_LAYOUT` = `topics.md` prompt, ~5 slides/section, ceiling 80 sections (chapter outlines cap at
+  12), and `outline.fallback_outline` (consecutive slides grouped, never across PDFs) if the outline call fails. This
+  supersedes "don't fragment into many small sections" **for the web app only**; the CLI default is still chapter-wise.
 - **Layout the user asked for:** two panes (sources + Studio action cards left, reader right); Summary is the default view;
   Learner / Revision (proficient) / Explain simply (dockey) / Quiz are buttons. Quiz = `quiz.json` parsed from the learner
   doc (`backend/pipeline/quiz.py`), no model call. Slide chips (from `<!-- slides … -->` anchors) open a popover.
@@ -73,16 +79,24 @@ Caches of generated prose are keyed by the full prompt, the input and `llm.gener
   slides.json, extracts.json, quiz.json}`. `convert_chapter` now also writes `extracts.json` + `slides.json` into the chapter dir.
 
 ## Infrastructure and models
-- **Default (since Oct 2026): hosted APIs, two models per run.** `stages:` in `backends.yaml` point at `chain` backends:
-  extract = Gemini 2.5 Flash → Qwen3.5-35B (OpenRouter) → `ollama_local`; write = DeepSeek V3.2 (text-only) → Qwen3.5 →
-  `ollama_local`; explain = `ollama_local` → Gemini 3.1 Flash-Lite. Chains fail over stickily (per run) when a member gives
-  up; `model_id`/`generation_id` follow the active member so caches stay keyed by the model that wrote them.
-  Usage is ~6k in + 1.2k out tokens per slide (learner + summary). Profiles: `api_pair`, `dev_free`, `local`, DashBW ones.
+- **Default (since Oct 2026): hosted APIs, two models per run, both on OpenRouter.** `stages:` in `backends.yaml` point at
+  `chain` backends: extract = Qwen3.5-35B (OpenRouter, `extract_chain_qwen`) → Gemini 2.5 Flash → `ollama_local`; write =
+  DeepSeek V3.2 (text-only) → Qwen3.5 → `ollama_local`; explain = `ollama_local` → Gemini 3.1 Flash-Lite. Chains fail over
+  stickily (per run) when a member gives up; `model_id`/`generation_id` follow the active member so caches stay keyed by
+  the model that wrote them. Chosen from a live bake-off on the user's slides (`docs/MODEL_COMPARISON.md`): reader accuracy
+  parity with Gemini at ~half the cost ($0.08 vs $0.16 per 100 slides); DeepSeek wrote cleaner notes than Qwen. Measured
+  total ≈ $0.19 per 100 slides (learner + summary). Profiles: `qwen_deepseek` (= default), `api_pair` (Gemini 2.5 Flash
+  reads), `dev_free`, `local`, DashBW ones. `eval/bakeoff.py` has `--stage extract|write` to re-measure.
 - **Spend caps:** every call is logged to `data/usage.jsonl`; `S2M_MAX_USD_PER_JOB` / `S2M_MAX_USD_PER_MONTH` raise
   `BudgetExceeded`, which the pipeline's broad `except Exception` handlers re-raise (never degrade around a cap).
 - **`kind: openai` backends** now get `options:` (presence_penalty etc.; `repeat_penalty`→`repetition_penalty` via
   extra_body), our own retry/backoff (SDK retries off), `rpm` pacing, `price`, `free`, `response_format`, and image
   stripping when `vision: false`. Model ids for Gemini 3.x were not verified against the live API yet.
+- **OpenRouter traps (found Oct 2026 with a live key):** never send `json_schema` to Qwen there (`response_format:
+  json_object`; the schema is already in the prompt); pin fp8 hosts with `provider.order/quantizations` because default
+  routing picked the dearest host and some hosts are fp4; price per slide must come from the usage ledger, not the
+  listing. `extract_slide` rejects a valid-but-empty reading (`is_empty_reading`); `sanitize` drops code lines echoed as
+  bullets (`drop_code_duplicates`). The OpenRouter key lives in `.env` (gitignored); never put keys in `.env.example`.
 - **Laptop model:** `ollama_local` = `qwen3.5:latest` (9.7B, vision, Q4); same presence_penalty override and `think: false`.
   The 35B doesn't fit (8 GB VRAM, 14 GB RAM).
 - **Machines:**

@@ -79,20 +79,25 @@ Changing the level reruns only step 4. Reordering a chapter's PDFs reruns only s
 ## Backends
 `backend/llm/backends.yaml` maps each stage to a backend. `--backend NAME` overrides it with a single backend or a **profile**, which is a per-stage mapping.
 
-**Default: hosted APIs, two models.** Slide reading uses a vision model; outlining, writing, the fact-check and the
-summary use a text model. Each stage is a fallback **chain**:
-- `extract_chain`: Gemini 2.5 Flash → Qwen3.5-35B-A3B (OpenRouter) → local Ollama;
+**Default: hosted APIs, two models, both on OpenRouter (one key).** Slide reading uses a vision model; outlining, writing,
+the fact-check and the summary use a text model. Each stage is a fallback **chain**:
+- `extract_chain_qwen` (default reader): Qwen3.5-35B-A3B (OpenRouter) → Gemini 2.5 Flash → local Ollama;
 - `write_chain`: DeepSeek V3.2 (OpenRouter, text-only: it gets the figure *descriptions*) → Qwen3.5 → local Ollama;
 - `explain_chain` (web "Explain this"): local Ollama → Gemini 3.1 Flash-Lite.
 
+Measured on this project's own slides ([docs/MODEL_COMPARISON.md](docs/MODEL_COMPARISON.md)): Qwen read about as accurately
+as Gemini 2.5 Flash at roughly half the cost, and DeepSeek wrote cleaner notes than Qwen. OpenRouter hosts differ a lot, so
+`backends.yaml` pins fp8 hosts that honour the settings used (see the traps in the guide).
+
 Every backend retries 429s, 5xx and network errors with backoff (honouring `Retry-After`). When one gives up, or has
-no key, the chain switches to the next for the rest of the run. Profiles: `api_pair` (the default), `dev_free` (Gemini
-free tier, $0 but rate-limited), `local` (laptop only), and the DashBW ones below.
+no key, the chain switches to the next for the rest of the run. Profiles: `qwen_deepseek` (= the default), `api_pair`
+(Gemini 2.5 Flash reads; needs `GEMINI_API_KEY`), `dev_free` (Gemini free tier, $0 but rate-limited), `local` (laptop only),
+and the DashBW ones below.
 
 **Cost control.** Every call is logged with its tokens and $ to `data/usage.jsonl`; `s2m usage` sums it by backend and job.
 `S2M_MAX_USD_PER_JOB` (default $1) and `S2M_MAX_USD_PER_MONTH` (default $5) stop a run before a paid call that would go
-over; local and free backends are never capped. Roughly 6k input + 1.2k output tokens per slide for learner + summary,
-so about $0.30 per 100 slides with the default pair.
+over; local and free backends are never capped. Measured: about **$0.19 per 100 slides** for learner + summary with the
+default pair (reader $0.08, writing side about $0.11), against about $0.27 with the Gemini-first `api_pair`.
 
 **Campus GPU (DashBW)**, via `--backend dashbw_qwen35` etc.:
 
@@ -108,11 +113,17 @@ Models in DashBW's shared Ollama, reached through an `ssh -L` tunnel. Ollama loa
 - Hosted APIs (keys in `.env`, see `.env.example`): `gemini_25_flash`, `gemini_25_flash_lite`, `gemini_flash_lite`,
   `gemini_free_flash` / `gemini_free_lite` (free-tier key), `deepseek_v32` and `openrouter_qwen35` (OpenRouter).
 
-**Comparing models** on your own slides:
+**Comparing models** on your own slides (full write-up and numbers: [docs/MODEL_COMPARISON.md](docs/MODEL_COMPARISON.md)):
 ```bash
-python eval/bakeoff.py "data/inbox/deck.pdf" --pages 3,8,30 --backends dashbw_ministral3,dashbw_qwen35
+# readers: the same pages through several backends; prints seconds, tokens and ~$ per 100 slides
+python eval/bakeoff.py "data/inbox/deck.pdf" --pages 3,8,30 --backends gemini_25_flash,openrouter_qwen35
+# writers: the same slides and outline, each writer writes (and fact-checks) the same topic sections
+python eval/bakeoff.py "data/inbox/deck.pdf" --stage write --reader openrouter_qwen35 \
+    --writers deepseek_v32,openrouter_qwen35 --sections 3
 ```
-Results go to `eval/results/<deck>/pNNN.md`, with each slide image next to every backend's extraction and timing.
+Results go to `eval/results/<deck>/`: for readers, each slide image next to every backend's extraction (`pNNN.md`); for
+writers, one Markdown file per writer plus `summary.md` (tokens, $, words vs budget, skipped slides, broken Markdown).
+Profile `qwen_deepseek` is Qwen3.5-35B reading and DeepSeek V3.2 writing, both on OpenRouter (one key).
 
 ## Output quality guards
 - **Fact-check pass:** after a section is written, the model compares it with its slides. It fixes contradictions and moves unsupported extras into a `> **Beyond the slides:**` box, or deletes them.
@@ -138,6 +149,14 @@ Results go to `eval/results/<deck>/pNNN.md`, with each slide image next to every
 ## Web app
 A NotebookLM-style site (`web/`, Next.js on Vercel): drop PDFs, read the summary first, then learner notes, revision
 sheet, explain-simply version and a quiz; highlight any text or click a figure to have it explained.
+
+**One book per notebook.** Every PDF in a notebook is merged into a single document with **no chapters**: the model groups
+all the slides by *topic* (merging repeats across PDFs, about one section per 5 slides, titled like a textbook section).
+The reader shows it as a **book**: a cover with the overview, key takeaways and a numbered table of contents, then one
+page per topic with Previous/Next cards, ← → keys, a progress bar, checkmarks for topics you've read, and your place
+remembered. A **Scroll** toggle gives one continuous page instead, and Print always prints every topic. The CLI keeps its
+chapter-wise default; `--by-topic` produces the same flat topic layout. `s2m worker --layout chapters` brings back
+chapters for the web app.
 
 ```
 Browser ─► Vercel (web/: UI + short API routes) ─► Supabase (Postgres, Storage, Realtime)

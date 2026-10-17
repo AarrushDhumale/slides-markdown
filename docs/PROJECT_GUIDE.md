@@ -123,7 +123,12 @@ A vision model sees the full slide, its crops and the PDF text layer as a hint, 
 - A slide that fails falls back to its text layer and is not cached, so the next run retries it. The run aborts if more than 30% of slides fail, which usually means the backend is down.
 
 ### 3.4 Layout: `chapterize.py`, `outline.py`, `per_deck.py`, `per_slide.py`
-The default layout is **chapter-wise**:
+The web app uses the **topic layout**: all PDFs are merged into one flat document with no chapters. One model call
+(`prompts/topics.md`) groups every slide by topic, merging recaps across PDFs, at about one section per 5 slides with no
+12-section ceiling. If that call fails, `fallback_outline` groups consecutive slides instead, so a run is never lost.
+`--by-topic` on the CLI gives the same layout.
+
+The CLI default is still **chapter-wise**:
 1. One model call detects the course's chapters from title slides, "Lecture N" markers and subject changes.
 2. `normalise()` cleans the result in code: chapters are contiguous and ordered, starts snap back to title/agenda slides, same-titled neighbours merge, tiny chapters merge with combined titles. Decks of 14 or fewer teaching slides are one chapter with no model call.
 3. Each chapter is split into parts of about 10 slides.
@@ -161,11 +166,13 @@ All models are called through one client, `backend/llm/client.py`, configured in
 | `chain` | An ordered list of the above, tried in turn |
 
 ### 4.2 Two models, one per job
+(How the reader and writer candidates compare, with measured token counts and the commands to test them on your slides: [MODEL_COMPARISON.md](MODEL_COMPARISON.md).)
+
 Reading slides and writing notes are different problems, so they use different models (`stages:` in `backends.yaml`):
 
 | Stage | Needs | Default chain |
 |---|---|---|
-| **extract** | Strong *vision*: dense tables, diagrams, accurate JSON | Gemini 2.5 Flash → Qwen3.5-35B-A3B (OpenRouter) → local Ollama |
+| **extract** | Strong *vision*: dense tables, diagrams, accurate JSON | Qwen3.5-35B-A3B (OpenRouter) → Gemini 2.5 Flash → local Ollama |
 | **outline / write / summary** | *Reasoning*, long coherent Markdown and LaTeX, rule-following. Text-only is fine | DeepSeek V3.2 (OpenRouter) → Qwen3.5-35B-A3B → local Ollama |
 | **explain** | Fast, short answers; can read images | Local Ollama → Gemini 3.1 Flash-Lite |
 
@@ -197,6 +204,10 @@ Ollama doesn't enforce JSON schemas for Qwen3.5, so ids come back as objects, fi
 - **Notebook page, two panes.**
   - **Left:** the uploaded sources, five **study-tool cards** (Summary, Learner notes, Revision sheet, Explain simply, Quiz) that show ready / generating / "Generate →", and a progress card (stage, count, running cost, or "generator offline, queued").
   - **Right:** the reader. A contents menu, a serif reading column, KaTeX maths, highlighted code, figures with a zoom viewer, "Slides A·4–6" chips that open the source slide images, and `.md` download and print.
+- **A book, not a long page.** The notes are one flat list of topics, so the reader presents them like a book: a cover
+  (title, overview, key takeaways, numbered contents), then one page per topic with Previous/Next cards, ← → keys, a
+  progress bar, read-checkmarks and a remembered place. `web/lib/book.ts` turns the Markdown into cover + pages; a Scroll
+  toggle shows everything continuously, and printing always includes every topic.
 - **Summary is the default view.** Learner notes come from the same first job; Revision and Explain simply are generated on demand; the quiz needs no extra model call.
 - **Quiz.** `backend/pipeline/quiz.py` parses each chapter's "Check your understanding" block (both layouts writers produce) out of the learner doc into `quiz.json`. The UI shows one card at a time with reveal-answer and Got it / Not yet, remembered in `localStorage`.
 - **Explain this.** Highlight text, or click a figure or slide: a panel streams a 2–5 sentence explanation, with **Simpler**, **Copy** and up to three follow-up questions, plus a badge showing whether the local model or the cloud answered.
@@ -247,9 +258,9 @@ Context is built **server-side**, so a client can only point at things, never in
 ### 6.2 Models and hosts
 | Choice | Role | Why |
 |---|---|---|
-| **Qwen3.5-35B-A3B** | Proven reader and writer; backs DashBW and OpenRouter | A mixture-of-experts model (36B total, ~3B active) with native vision. It beat gemma3:12b, ministral-3:8b and minicpm-v on dense tables and diagrams in the bake-off (`eval/bakeoff.py`), and all the prompts were tuned on it, so it is the safe fallback. |
-| **Gemini 2.5 Flash** (extract) | Primary slide reader | Strong document and table OCR at a low price; thinking is turned off so hidden tokens don't bill as output. |
-| **DeepSeek V3.2** (write) | Primary writer | Strong reasoning and LaTeX with very cheap output, which matters because writing is output-heavy. Text-only, hence the figure-description trade-off. |
+| **Qwen3.5-35B-A3B** | Primary slide reader (OpenRouter); backs DashBW; writer fallback | A mixture-of-experts model (36B total, ~3B active) with native vision. It beat gemma3:12b, ministral-3:8b and minicpm-v on dense tables and diagrams in the bake-off (`eval/bakeoff.py`), and all the prompts were tuned on it, so it is the safe fallback. |
+| **Gemini 2.5 Flash** (extract) | Backup reader (`api_pair` profile leads with it) | Strong document and table OCR, schema-enforced JSON. Measured: as accurate as Qwen on nine hard pages but about twice the cost per slide, so it backs Qwen up instead. |
+| **DeepSeek V3.2** (write) | Primary writer | Cleaner, better-structured notes than Qwen as a writer in the bake-off, about 30% cheaper, but about 3× slower. Text-only, hence the figure-description trade-off. Pinned to hosts that honour `reasoning: false` (one cheaper host kept thinking, which cost more per answer). |
 | **Gemini 3.1 Flash-Lite** | Explain fallback | A fast, cheap, vision-capable model from a different vendor than the writers, so one outage doesn't take everything down. |
 | **Ollama + Qwen3.5 9.7B** | Laptop and "Explain this" local model | Already installed; fits the 8 GB RTX 5060 and supports vision. Free and offline, so it is the last step of every chain. The 35B model needs about 23 GB and cannot fit this laptop. |
 | **OpenRouter** | One key for DeepSeek and Qwen | A single billing relationship and OpenAI-compatible API for models that otherwise need separate accounts. |
@@ -313,16 +324,17 @@ Context is built **server-side**, so a client can only point at things, never in
 
 ## 8. Cost model
 
-Measured from this repo's caches: about **6k input + 1.2k output tokens per slide** for learner + summary, including the fact-check and retries. A 100-slide deck is roughly 0.6M tokens in and 0.12M out.
+Measured with a live OpenRouter key on this project's own slides (full results in [MODEL_COMPARISON.md](MODEL_COMPARISON.md)); the summary step is estimated.
 
-| Setup | Per 100 slides | At ~400 slides/month |
-|---|---|---|
-| Default pair (Gemini 2.5 Flash reads, DeepSeek V3.2 writes) | about **$0.32** | about $1.30 |
-| Budget pair (Gemini 2.5 Flash-Lite + DeepSeek V3.2) | about $0.15 | about $0.60 |
-| Gemini free tier (`dev_free`) | $0, rate-limited, prompts may be used for training | $0 |
-| Laptop, local Qwen3.5 9.7B (`local`) | $0, roughly 1–2 hours | $0 |
+| Setup | Reader | Outline + write + review + summary | **Per 100 slides** | At ~400 slides/month |
+|---|---|---|---|---|
+| **Default: Qwen3.5-35B reads, DeepSeek V3.2 writes** (`qwen_deepseek`) | $0.08 | ~$0.11 | **~$0.19** | ~$0.76 |
+| Gemini 2.5 Flash reads, DeepSeek writes (`api_pair`) | $0.16 | ~$0.11 | ~$0.27 | ~$1.08 |
+| Qwen3.5-35B for both | $0.08 | ~$0.15 | ~$0.23 | ~$0.92 |
+| Gemini free tier (`dev_free`) | $0, rate-limited, prompts may be used for training | | $0 | $0 |
+| Laptop, local Qwen3.5 9.7B (`local`) | $0, roughly 1–2 hours | | $0 | $0 |
 
-Prices were checked in October 2026 against Google's pricing page and OpenRouter listings; several figures (notably newer Gemini versions and DeepSeek V4 variants) come from third-party trackers that disagree, so check the providers before relying on them. Each extra level adds about 0.15M input and 0.05M output tokens per 100 slides. At this volume the monthly bill is a few dollars at most, so models were chosen on quality and reliability, not price.
+The reader figures come from nine deliberately hard pages, so typical slides cost less. Each extra level adds a similar writing cost without re-reading the slides. At this volume the bill is about a dollar a month, so models were chosen on measured quality and reliability, not price. Prices and host availability change: re-check with the OpenRouter endpoints listing, and trust the usage ledger's billed costs over any listing.
 
 ---
 
@@ -330,11 +342,12 @@ Prices were checked in October 2026 against Google's pricing page and OpenRouter
 
 All tests run offline: no GPU, no network, no real Supabase.
 
-- **`.venv/bin/pytest -q`: 66 tests.**
+- **`.venv/bin/pytest -q`: 77 tests.**
   - `test_pipeline.py`: synthetic PDFs with raster and vector diagrams and template logos, run end to end through a deterministic fake LLM in every layout mode, plus failure injection (a flaky model, a rambling model).
   - `test_llm_chain.py`: retry and `Retry-After`, fail-fast on 4xx, chain failover and stickiness, a missing key, sampling options forwarded, text-only image stripping, ledger and price maths, per-job and monthly caps, budget not failed over, rate limiting, streaming failover, `max_output`.
+  - `test_bakeoff.py`: the reader and writer bake-off harness (`eval/bakeoff.py`) end to end with the fake LLM.
   - `test_worker.py`: a job end to end against an in-memory Supabase; failure reporting; interruption requeues; Explain streaming and cache; bad Explain requests; context building and validation; quiz parsing in both layouts; the prompt-sync check.
-- **`cd web && pnpm test`: 5 tests** for the doc-splitting and slug helpers that must match Python.
+- **`cd web && pnpm test`: 10 tests** for the doc-splitting, slug and book-parsing helpers that must match Python.
 - **Checked live, not in the suite:**
   - the SQL migration on a real Postgres: job claiming, stale-job reclaim, row-level security, and the column and function grants;
   - the whole stack on a local Supabase: uploads, quotas, ownership checks, a 6-slide deck converted on the laptop model, Explain streaming for text and figures, and on-demand generation;
@@ -352,7 +365,7 @@ cd /home/aarrush/personal/projects/slides_to_markdown
 .venv/bin/s2m convert deck.pdf --backend dev_free     # Gemini free tier
 .venv/bin/s2m convert deck.pdf --backend local        # laptop only
 ```
-Profiles: `api_pair` (default), `dev_free`, `local`, `dashbw_qwen35`, `dashbw_small`.
+Profiles: `qwen_deepseek` (= default), `api_pair`, `dev_free`, `local`, `dashbw_qwen35`, `dashbw_small`.
 
 ### Local web development
 1. Copy `.env.example` to `.env` and fill in `GEMINI_API_KEY` and `OPENROUTER_API_KEY` (leave blank to use only `local`).
@@ -377,6 +390,16 @@ Profiles: `api_pair` (default), `dev_free`, `local`, `dashbw_qwen35`, `dashbw_sm
 - **A small local model can loop** on one slide for many minutes; `max_output` bounds it.
 - **A `now()` string is not a timestamp** over the Supabase REST API; send real ISO times.
 - **Broad `except Exception` swallowed the spend cap** until `BudgetExceeded` was re-raised explicitly.
+- **`response_format: json_schema` can empty a model's answer.** Qwen3.5-35B on OpenRouter's default host answered a dense
+  slide with the shortest valid JSON (empty arrays, 35 tokens); `json_object` or no format gave the full reading. The
+  Qwen backend now uses `json_object`, and `extract_slide` refuses a valid-but-empty reading of a slide that has text
+  (it falls back to the text layer and is never cached).
+- **OpenRouter's headline price is the cheapest host's, and default routing isn't price-first.** Qwen was routed to the
+  dearest host ($0.24/$1.80 vs the listed $0.15/$1.00), and some hosts serve fp4. `backends.yaml` pins fp8 hosts
+  (`provider.order`, `quantizations`, `require_parameters`); check live prices with
+  `GET /api/v1/models/<id>/endpoints`, and use the usage ledger (OpenRouter reports the billed cost) to confirm.
+- **A bake-off harness must not reuse job ids**, or each run's per-slide cost silently includes earlier runs (fixed;
+  `test_repeated_runs_do_not_inherit_each_others_token_totals`).
 - **Vector diagrams aren't images**, so figure detection must cluster drawn shapes, and template images must be removed by xref, not by blanking pixels.
 - **Vercel's 4.5 MB body limit** rules out uploading PDFs through an API route; use signed storage URLs.
 - **The campus network** (HTTPS interception, expiring captive-portal login) is why the worker doesn't run on DashBW.
@@ -400,7 +423,7 @@ Profiles: `api_pair` (default), `dev_free`, `local`, `dashbw_qwen35`, `dashbw_sm
 - The local 9B model reads slides at about 50 seconds each and writes a section in about 2 minutes: fine as a fallback, slow as a default.
 
 **Roadmap**
-- Run the model bake-offs on the Paging deck (`eval/bakeoff.py`, with a planned `--stage write`) to confirm the default pair.
+- Run the reader and writer bake-offs (`eval/bakeoff.py --stage extract|write`, see [MODEL_COMPARISON.md](MODEL_COMPARISON.md)) to decide between `api_pair` and `qwen_deepseek`.
 - Google sign-in restricted to the campus domain, linked to the anonymous user.
 - A container image for the worker and a Cloud Run Job, plus mirroring the caches to Storage so a worker with ephemeral disk still reuses paid work.
 - A slide pane that follows scrolling, and a "retry failed slides" action.

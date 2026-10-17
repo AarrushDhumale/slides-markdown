@@ -146,7 +146,7 @@ def cmd_usage(args):
 def cmd_worker(args):
     from backend.worker import run_worker
 
-    run_worker(backend=args.backend, once=args.once)
+    run_worker(backend=args.backend, once=args.once, layout=args.layout)
 
 
 def main(argv=None):
@@ -194,6 +194,9 @@ def main(argv=None):
     w = sub.add_parser("worker", help="web app worker: run queued jobs and Explain requests from Supabase")
     w.add_argument("--backend", help="backend or profile for conversions (default: stages in backends.yaml)")
     w.add_argument("--once", action="store_true", help="process what is queued, then exit")
+    w.add_argument("--layout", choices=["topics", "chapters"], default="topics",
+                   help="topics (default): all PDFs merged into one flat book of topic sections; "
+                        "chapters: auto-detected chapters")
     w.set_defaults(func=cmd_worker)
 
     s = sub.add_parser("server", help="manage the on-demand vLLM server")

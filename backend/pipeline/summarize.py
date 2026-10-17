@@ -39,6 +39,16 @@ def _cached(chapter: Chapter, name: str, prompt: str, user: str, llm: LLM,
     return text
 
 
+def keep_heading(summary_md: str, learner_md: str) -> str:
+    """A topic has one title at every level: the summary takes the learner section's heading (the
+    summarising model likes to shorten it), whether the summary came fresh or from an older cache."""
+    m = re.match(r"\s*(#{2,3} .+)", learner_md)
+    if not m:
+        return summary_md
+    body = re.sub(r"\A\s*#{1,6} .*\n*", "", summary_md, count=1)
+    return f"{m.group(1).strip()}\n\n{body.lstrip()}"
+
+
 def summarize_section(learner_md: str, idx: int, llm: LLM, chapter: Chapter, subdir: str = "sections") -> str:
     prompt = (PROMPTS_DIR / "summary.md").read_text()
     limit = word_limit(learner_md)
@@ -51,7 +61,7 @@ def summarize_section(learner_md: str, idx: int, llm: LLM, chapter: Chapter, sub
             out = llm.chat(msgs, max_tokens=int(limit * 2.5) + 400, temperature=0.0)
         return strip_degenerate(out) if degeneration(out) else out
 
-    return _cached(chapter, f"{idx:02d}", prompt, user, llm, generate, subdir)
+    return keep_heading(_cached(chapter, f"{idx:02d}", prompt, user, llm, generate, subdir), learner_md)
 
 
 def chapter_takeaways(section_summaries: list[str], llm: LLM, chapter: Chapter, subdir: str = "sections") -> str:

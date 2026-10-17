@@ -45,6 +45,7 @@ HEARTBEAT_EVERY = 20.0
 PROGRESS_EVERY = 1.0               # throttle job progress writes
 PARTIAL_EVERY = 0.3                # throttle streamed explanation writes
 SLIDE_IMAGE_WIDTH = 1200
+LAYOUTS = ("topics", "chapters")
 MAX_PAGES = 300                    # per notebook: bounds the cost of one job
 
 
@@ -113,9 +114,13 @@ def _content_type(path: Path) -> str:
 
 
 class Worker:
-    def __init__(self, db: Supabase, backend: str | None = None, worker_id: str | None = None):
+    def __init__(self, db: Supabase, backend: str | None = None, worker_id: str | None = None,
+                 layout: str = "topics"):
+        if layout not in LAYOUTS:
+            raise ValueError(f"layout must be one of {LAYOUTS}")
         self.db = db
         self.backend = backend
+        self.layout = layout  # "topics": every PDF merged into one flat book of topics; "chapters": legacy
         self.worker_id = worker_id or socket.gethostname()
         self.running_job: dict | None = None
         self.once = False
@@ -186,7 +191,8 @@ class Worker:
 
         usage.set_job(job["id"])
         try:
-            outputs = convert_chapter(chapter, levels, self.backend, progress)
+            outputs = convert_chapter(chapter, levels, self.backend, progress,
+                                      by_topic=self.layout == "topics")
             self.upload_outputs(nb, chapter, outputs)
             self.db.update("jobs", {"id": job["id"]}, {
                 "status": "done", "stage": "done", "finished_at": _now(), "error": None,
@@ -443,10 +449,10 @@ class Worker:
             pass
 
 
-def run_worker(backend: str | None = None, once: bool = False) -> None:
+def run_worker(backend: str | None = None, once: bool = False, layout: str = "topics") -> None:
     url, key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SERVICE_KEY")
     if not url or not key:
         raise SystemExit("set SUPABASE_URL and SUPABASE_SERVICE_KEY (e.g. in .env) to run the worker")
-    worker = Worker(Supabase(url, key), backend)
+    worker = Worker(Supabase(url, key), backend, layout=layout)
     print(f"s2m worker '{worker.worker_id}' polling {url} (Ctrl-C to stop)")
     worker.run(once=once)

@@ -2,17 +2,32 @@
 
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Popover from "@radix-ui/react-popover";
-import { Download, GalleryHorizontalEnd, ListTree, Printer, Sparkles, X } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  BookOpen,
+  Check,
+  ChevronRight,
+  Download,
+  GalleryHorizontalEnd,
+  ListTree,
+  Printer,
+  ScrollText,
+  Sparkles,
+  X,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ExplainPanel, type ExplainTarget } from "@/components/explain-panel";
 import { Markdown, type ImageHandlers } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
+import { parseBook, type BookPage } from "@/lib/book";
 import { supabase } from "@/lib/client";
 import { cn } from "@/lib/cn";
-import { assetPaths, splitDoc, stripContents, toc } from "@/lib/slide-anchors";
+import { assetPaths } from "@/lib/slide-anchors";
 
 export type SlideIndex = Record<string, { image: string; title: string }>;
+type Mode = "book" | "scroll";
 
 const LEVEL_NAMES: Record<string, string> = {
   summary: "Summary",
@@ -40,6 +55,22 @@ export function useSignedUrls(notebookId: string) {
   return { urls, request };
 }
 
+function stored<T>(key: string, fallback: T, parse: (raw: string) => T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw === null ? fallback : parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+function save(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* private mode: position just won't be remembered */
+  }
+}
+
 export function Reader({
   notebookId,
   level,
@@ -51,19 +82,88 @@ export function Reader({
   md: string;
   slides: SlideIndex | null;
 }) {
-  const { preamble, sections } = useMemo(() => splitDoc(md), [md]);
-  const contents = useMemo(() => toc(md).filter((t, _, all) => (all.some((x) => x.level === 2) ? t.level === 2 : true)), [md]);
+  const book = useMemo(() => parseBook(md), [md]);
+  const total = book.pages.length;
+  const hasPages = total > 0;
   const { urls, request } = useSignedUrls(notebookId);
+
+  // Mounted only after the notes were fetched in the browser, so reading localStorage here is safe.
+  const [mode, setMode] = useState<Mode>(() => stored(`mode:${notebookId}`, "book", (r) => (r === "scroll" ? "scroll" : "book")));
+  const [page, setPage] = useState<number>(() => stored(`page:${notebookId}`, 0, (r) => Math.min(Math.max(0, Number(r) || 0), total)));
+  const [read, setRead] = useState<Set<number>>(() => stored(`read:${notebookId}`, new Set<number>(), (r) => new Set<number>(JSON.parse(r))));
+  const [dir, setDir] = useState<"next" | "prev">("next");
+  const [printing, setPrinting] = useState(false);
   const [zoom, setZoom] = useState<{ url: string; alt: string } | null>(null);
   const [target, setTarget] = useState<ExplainTarget | null>(null);
   const [pick, setPick] = useState<ExplainTarget | null>(null); // floating "Explain" button for a text selection
   const container = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    request(assetPaths(md));
-  }, [md, request]);
+  const showAll = mode === "scroll" || printing || !hasPages;
 
-  const words = useMemo(() => md.split(/\s+/).length, [md]);
+  const go = useCallback(
+    (n: number) => {
+      const next = Math.min(Math.max(0, n), total);
+      setDir(next >= page ? "next" : "prev");
+      setPage(next);
+      setTarget(null);
+      setPick(null);
+      window.scrollTo({ top: 0 });
+    },
+    [page, total],
+  );
+
+  useEffect(() => {
+    save(`page:${notebookId}`, String(page));
+    if (page > 0) {
+      setRead((prev) => {
+        if (prev.has(page)) return prev;
+        const next = new Set(prev).add(page);
+        save(`read:${notebookId}`, JSON.stringify([...next]));
+        return next;
+      });
+    }
+  }, [page, notebookId]);
+
+  const setViewMode = (m: Mode) => {
+    setMode(m);
+    save(`mode:${notebookId}`, m);
+    setTarget(null);
+    setPick(null);
+    window.scrollTo({ top: 0 });
+  };
+
+  // Images: only this page and the next one in book mode; everything when scrolling or printing.
+  useEffect(() => {
+    if (showAll) return void request(assetPaths(md));
+    const cur = page > 0 ? book.pages[page - 1] : null;
+    request([...assetPaths(cur ? cur.body : book.intro), ...assetPaths(book.pages[page]?.body ?? "")]);
+  }, [showAll, md, page, book, request]);
+
+  // Arrow keys turn pages (not while typing, or while a dialog such as Explain is open).
+  useEffect(() => {
+    if (showAll) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;
+      const el = document.activeElement as HTMLElement | null;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
+      if (document.querySelector('[role="dialog"]')) return;
+      go(page + (e.key === "ArrowRight" ? 1 : -1));
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showAll, page, go]);
+
+  // Print everything, not just the open page.
+  useEffect(() => {
+    if (!printing) return;
+    const done = () => setPrinting(false);
+    window.addEventListener("afterprint", done, { once: true });
+    const t = setTimeout(() => window.print(), 900);
+    return () => {
+      clearTimeout(t);
+      window.removeEventListener("afterprint", done);
+    };
+  }, [printing]);
 
   const imageHandlers = useCallback(
     (section: number): ImageHandlers => ({
@@ -77,7 +177,7 @@ export function Reader({
     }),
     [urls],
   );
-  const handlers = useMemo(() => sections.map((s) => imageHandlers(s.index)), [sections, imageHandlers]);
+  const plainImages = useMemo<ImageHandlers>(() => ({ resolve: (s) => urls[s], onZoom: (url, alt) => setZoom({ url, alt }) }), [urls]);
 
   // text selection -> floating Explain button
   useEffect(() => {
@@ -108,33 +208,77 @@ export function Reader({
     const blob = new Blob([md], { type: "text/markdown" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `${(md.match(/^# (.+)$/m)?.[1] ?? "notes").replace(/[^\w -]+/g, "").trim()} - ${LEVEL_NAMES[level] ?? level}.md`;
+    a.download = `${book.title.replace(/[^\w -]+/g, "").trim() || "notes"} - ${LEVEL_NAMES[level] ?? level}.md`;
     a.click();
     URL.revokeObjectURL(a.href);
   };
 
+  const explainSlide = (section: number, sid: string, rect?: ExplainTarget["rect"]) =>
+    setTarget({ section, image: `slide:${sid}`, label: `Slide ${sid}: ${slides?.[sid]?.title ?? ""}`, rect });
+  const chip = (p: BookPage) =>
+    slides && p.slides.length > 0 ? (
+      <SlidesChip spec={p.spec} ids={p.slides} slides={slides} urls={urls} request={request} onExplain={(sid, rect) => explainSlide(p.index, sid, rect)} />
+    ) : null;
+
+  const levelName = LEVEL_NAMES[level] ?? level;
+  const progress = hasPages ? (showAll ? 0 : page / total) : 0;
+
   return (
     <div ref={container} className="relative">
       <div className="no-print sticky top-14 z-20 -mx-4 mb-6 flex items-center gap-2 border-b border-border bg-bg/85 px-4 py-2.5 backdrop-blur sm:-mx-8 sm:px-8">
-        <span className="text-[13px] font-semibold">{LEVEL_NAMES[level] ?? level}</span>
-        <span className="text-[12.5px] text-faint">· {Math.max(1, Math.round(words / 230))} min read</span>
+        <span className="text-[13px] font-semibold whitespace-nowrap">{levelName}</span>
+        <span className="truncate text-[12.5px] text-faint max-sm:hidden">
+          {hasPages && !showAll ? (page === 0 ? "· Cover" : `· Topic ${page} of ${total}`) : `· ${book.minutes} min read`}
+        </span>
         <div className="ml-auto flex items-center gap-1">
-          {contents.length > 1 && (
+          {hasPages && (
+            <div role="group" aria-label="Reading view" className="mr-1 flex rounded-lg bg-surface-2 p-0.5">
+              {([["book", BookOpen, "Book"], ["scroll", ScrollText, "Scroll"]] as const).map(([m, Icon, label]) => (
+                <button
+                  key={m}
+                  aria-pressed={mode === m}
+                  onClick={() => setViewMode(m)}
+                  title={`${label} view`}
+                  className={cn(
+                    "flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] font-medium transition-colors",
+                    mode === m ? "bg-surface text-text shadow-card" : "text-muted hover:text-text",
+                  )}
+                >
+                  <Icon className="size-3.5" /> <span className="max-md:hidden">{label}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {hasPages && (
             <Popover.Root>
               <Popover.Trigger asChild>
-                <Button size="sm" variant="ghost">
+                <Button size="sm" variant="ghost" aria-label="Contents" title="Contents">
                   <ListTree className="size-4" /> <span className="max-sm:hidden">Contents</span>
                 </Button>
               </Popover.Trigger>
               <Popover.Portal>
-                <Popover.Content align="end" sideOffset={6} className="rise z-50 max-h-[60dvh] w-[320px] overflow-y-auto rounded-xl border border-border bg-surface p-1.5 shadow-pop">
-                  {contents.map((t) => (
-                    <Popover.Close asChild key={t.id + t.title}>
+                <Popover.Content align="end" sideOffset={6} className="rise z-50 max-h-[65dvh] w-[340px] max-w-[calc(100vw-24px)] overflow-y-auto rounded-xl border border-border bg-surface p-1.5 shadow-pop">
+                  <Popover.Close asChild>
+                    <button
+                      onClick={() => (mode === "book" ? go(0) : window.scrollTo({ top: 0, behavior: "smooth" }))}
+                      className={cn("flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] hover:bg-surface-2", !showAll && page === 0 && "bg-accent-soft text-accent-text")}
+                    >
+                      <BookOpen className="size-3.5 shrink-0" /> Cover &amp; overview
+                    </button>
+                  </Popover.Close>
+                  {book.pages.map((p) => (
+                    <Popover.Close asChild key={p.index}>
                       <button
-                        onClick={() => document.getElementById(t.id)?.scrollIntoView({ behavior: "smooth" })}
-                        className={cn("block w-full rounded-lg px-2.5 py-1.5 text-left text-[13px] hover:bg-surface-2", t.level === 3 && "pl-5 text-muted")}
+                        onClick={() => {
+                          if (mode === "book") go(p.number);
+                          else document.getElementById(`topic-${p.number}`)?.scrollIntoView({ behavior: "smooth" });
+                        }}
+                        className={cn("flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] hover:bg-surface-2", !showAll && page === p.number && "bg-accent-soft text-accent-text")}
                       >
-                        {t.title}
+                        <span className={cn("grid size-5 shrink-0 place-items-center rounded-md text-[11px] font-semibold tabular-nums", read.has(p.number) ? "bg-success-soft text-success" : "bg-surface-2 text-muted")}>
+                          {read.has(p.number) ? <Check className="size-3" /> : p.number}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate">{p.title}</span>
                       </button>
                     </Popover.Close>
                   ))}
@@ -145,30 +289,42 @@ export function Reader({
           <Button size="sm" variant="ghost" onClick={download} title="Download Markdown">
             <Download className="size-4" /> <span className="max-sm:hidden">.md</span>
           </Button>
-          <Button size="sm" variant="ghost" onClick={() => window.print()} title="Print or save as PDF">
+          <Button size="sm" variant="ghost" onClick={() => setPrinting(true)} title="Print or save as PDF (all topics)">
             <Printer className="size-4" />
           </Button>
         </div>
+        {hasPages && !showAll && (
+          <div className="absolute inset-x-0 bottom-[-1px] h-0.5 bg-transparent" aria-hidden>
+            <div className="h-full bg-accent transition-all duration-300" style={{ width: `${progress * 100}%` }} />
+          </div>
+        )}
       </div>
 
-      <article className="mx-auto max-w-[44rem] pb-32">
-        <Markdown images={{ resolve: (s) => urls[s], onZoom: (url, alt) => setZoom({ url, alt }) }}>{stripContents(preamble)}</Markdown>
-        {sections.map((s) => (
-          <section key={s.index} data-section={s.index} className="group/sec relative">
-            {slides && s.slides.length > 0 && (
-              <SlidesChip
-                spec={s.spec}
-                ids={s.slides}
-                slides={slides}
-                urls={urls}
-                request={request}
-                onExplain={(sid, rect) => setTarget({ section: s.index, image: `slide:${sid}`, label: `Slide ${sid}: ${slides[sid]?.title ?? ""}`, rect })}
-              />
-            )}
-            <Markdown images={handlers[s.index]}>{s.md}</Markdown>
-          </section>
-        ))}
-      </article>
+      {showAll ? (
+        <article className="mx-auto max-w-[44rem] pb-32">
+          <Markdown images={plainImages}>{[`# ${book.title}`, book.intro].filter(Boolean).join("\n\n")}</Markdown>
+          {book.pages.map((p) => (
+            <section key={p.index} id={`topic-${p.number}`} data-section={p.index} className={cn("scroll-mt-28", p.number > 1 && "print:break-before-page")}>
+              <div className="no-print flex justify-end pt-8 pb-1">{chip(p)}</div>
+              <Markdown images={imageHandlers(p.index)}>{`## ${p.title}\n\n${p.body}`}</Markdown>
+            </section>
+          ))}
+        </article>
+      ) : page === 0 ? (
+        <Cover book={book} levelName={levelName} read={read} dir={dir} images={plainImages} onOpen={go} />
+      ) : (
+        <TopicPage
+          key={page}
+          page={book.pages[page - 1]}
+          total={total}
+          prev={page > 1 ? book.pages[page - 2] : null}
+          next={page < total ? book.pages[page] : null}
+          dir={dir}
+          images={imageHandlers(book.pages[page - 1].index)}
+          chip={chip(book.pages[page - 1])}
+          onGo={go}
+        />
+      )}
 
       {pick && !target && (
         <button
@@ -207,6 +363,132 @@ export function Reader({
   );
 }
 
+function Cover({
+  book,
+  levelName,
+  read,
+  dir,
+  images,
+  onOpen,
+}: {
+  book: ReturnType<typeof parseBook>;
+  levelName: string;
+  read: Set<number>;
+  dir: "next" | "prev";
+  images: ImageHandlers;
+  onOpen: (n: number) => void;
+}) {
+  const meta = [
+    `${book.pages.length} topic${book.pages.length === 1 ? "" : "s"}`,
+    `${book.slideCount} slide${book.slideCount === 1 ? "" : "s"}`,
+    book.decks.length > 1 ? `${book.decks.length} PDFs` : null,
+    `${book.minutes} min read`,
+  ].filter(Boolean);
+  const firstUnread = book.pages.find((p) => !read.has(p.number))?.number ?? 1;
+  const started = read.size > 0;
+  return (
+    <div className={cn("mx-auto max-w-[46rem] pb-24", dir === "next" ? "turn-next" : "turn-prev")}>
+      <div className="overflow-hidden rounded-3xl border border-border bg-surface shadow-card max-sm:rounded-2xl">
+        <div className="h-1.5 bg-gradient-to-r from-accent via-accent/60 to-accent/10" />
+        <div className="px-6 py-9 sm:px-12 sm:py-12">
+          <p className="text-[11.5px] font-semibold tracking-[0.14em] text-accent-text uppercase">{levelName} · Study book</p>
+          <h1 className="mt-3 font-sans text-[2.15rem] leading-[1.1] font-semibold tracking-[-0.03em] text-balance sm:text-[2.6rem]">{book.title}</h1>
+          <p className="mt-4 text-[13.5px] text-muted">{meta.join(" · ")}</p>
+          {book.decks.length > 0 && (
+            <p className="mt-1 line-clamp-2 text-[12.5px] text-faint">From {book.decks.join(" · ")}</p>
+          )}
+          {book.intro && <Markdown images={images} className="mt-8">{book.intro}</Markdown>}
+          <Button variant="primary" className="mt-8" onClick={() => onOpen(started ? firstUnread : 1)}>
+            {started ? "Continue reading" : "Start reading"} <ArrowRight className="size-4" />
+          </Button>
+        </div>
+      </div>
+
+      <h2 className="mt-10 mb-3 text-[11.5px] font-semibold tracking-[0.14em] text-faint uppercase">Contents</h2>
+      <ol className="overflow-hidden rounded-2xl border border-border bg-surface shadow-card">
+        {book.pages.map((p) => (
+          <li key={p.index} className="border-b border-border last:border-0">
+            <button onClick={() => onOpen(p.number)} className="group flex w-full items-center gap-3.5 px-4 py-3.5 text-left transition-colors hover:bg-surface-2 sm:px-5">
+              <span className={cn("grid size-7 shrink-0 place-items-center rounded-lg text-[12px] font-semibold tabular-nums", read.has(p.number) ? "bg-success-soft text-success" : "bg-surface-2 text-muted group-hover:bg-accent-soft group-hover:text-accent-text")}>
+                {read.has(p.number) ? <Check className="size-3.5" /> : p.number}
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[14.5px] font-medium tracking-tight">{p.title}</span>
+                <span className="block text-[12px] text-faint">
+                  Slides {p.spec.replace(/-/g, "–")} · {p.minutes} min
+                </span>
+              </span>
+              <ChevronRight className="size-4 shrink-0 text-faint transition-transform group-hover:translate-x-0.5 group-hover:text-text" />
+            </button>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+function TopicPage({
+  page,
+  total,
+  prev,
+  next,
+  dir,
+  images,
+  chip,
+  onGo,
+}: {
+  page: BookPage;
+  total: number;
+  prev: BookPage | null;
+  next: BookPage | null;
+  dir: "next" | "prev";
+  images: ImageHandlers;
+  chip: React.ReactNode;
+  onGo: (n: number) => void;
+}) {
+  return (
+    <div className={cn("book-page mx-auto max-w-[46rem] pb-24", dir === "next" ? "turn-next" : "turn-prev")}>
+      <article
+        data-section={page.index}
+        className="rounded-3xl border border-border bg-surface px-6 py-8 shadow-card sm:px-12 sm:py-12 max-sm:rounded-none max-sm:border-0 max-sm:bg-transparent max-sm:px-0 max-sm:py-2 max-sm:shadow-none"
+      >
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-[11.5px] font-semibold tracking-[0.14em] text-accent-text uppercase">
+            Topic {page.number} <span className="text-faint">of {total}</span>
+          </p>
+          <div className="no-print">{chip}</div>
+        </div>
+        <h1 className="mt-3 font-sans text-[1.85rem] leading-[1.15] font-semibold tracking-[-0.025em] text-balance sm:text-[2.2rem]">{page.title}</h1>
+        <p className="mt-2 text-[12.5px] text-faint">{page.minutes} min read</p>
+        <hr className="my-7 border-border" />
+        <Markdown images={images}>{page.body}</Markdown>
+      </article>
+
+      <nav className="no-print mt-5 grid grid-cols-2 gap-3" aria-label="Page navigation">
+        <button
+          onClick={() => onGo(prev ? prev.number : 0)}
+          className="group flex flex-col items-start rounded-2xl border border-border bg-surface px-4 py-3.5 text-left shadow-card transition-all hover:-translate-y-px hover:border-border-strong"
+        >
+          <span className="flex items-center gap-1.5 text-[11.5px] font-medium text-faint">
+            <ArrowLeft className="size-3.5 transition-transform group-hover:-translate-x-0.5" /> {prev ? "Previous" : "Cover"}
+          </span>
+          <span className="mt-1 line-clamp-2 text-[14px] font-medium tracking-tight">{prev ? prev.title : "Back to contents"}</span>
+        </button>
+        <button
+          onClick={() => onGo(next ? next.number : 0)}
+          className="group flex flex-col items-end rounded-2xl border border-border bg-surface px-4 py-3.5 text-right shadow-card transition-all hover:-translate-y-px hover:border-border-strong"
+        >
+          <span className="flex items-center gap-1.5 text-[11.5px] font-medium text-faint">
+            {next ? "Next" : "Finished"} <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />
+          </span>
+          <span className="mt-1 line-clamp-2 text-[14px] font-medium tracking-tight">{next ? next.title : "Back to contents"}</span>
+        </button>
+      </nav>
+      <p className="no-print mt-4 text-center text-[12px] text-faint max-sm:hidden">Use ← → to turn pages</p>
+    </div>
+  );
+}
+
 function SlidesChip({
   spec,
   ids,
@@ -226,13 +508,11 @@ function SlidesChip({
   if (!shown.length) return null;
   return (
     <Popover.Root onOpenChange={(open) => open && request(shown.map((sid) => slides[sid].image))}>
-      <div className="no-print flex justify-end pt-8 pb-1">
-        <Popover.Trigger asChild>
-          <button className="inline-flex h-7 items-center gap-1.5 rounded-full border border-border bg-surface px-2.5 font-sans text-[11.5px] font-medium text-muted opacity-70 shadow-card transition hover:text-text hover:opacity-100 group-hover/sec:opacity-100 max-sm:opacity-100">
-            <GalleryHorizontalEnd className="size-3.5" /> Slides {spec.replace(/-/g, "–")}
-          </button>
-        </Popover.Trigger>
-      </div>
+      <Popover.Trigger asChild>
+        <button className="inline-flex h-7 items-center gap-1.5 rounded-full border border-border bg-surface px-2.5 font-sans text-[11.5px] font-medium text-muted shadow-card transition hover:text-text">
+          <GalleryHorizontalEnd className="size-3.5" /> Slides {spec.replace(/-/g, "–")}
+        </button>
+      </Popover.Trigger>
       <Popover.Portal>
         <Popover.Content
           align="end"

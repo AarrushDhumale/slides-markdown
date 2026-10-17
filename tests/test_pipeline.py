@@ -3,6 +3,8 @@
 import json
 import re
 
+import pytest
+
 from backend.pipeline.assemble import (check_markdown, compress_ids, drop_repeat_images,
                                        ensure_essential_figures, normalize_section, resolve_asset)
 from backend.pipeline.chapter import Chapter, Slide, build_slides, slide_file_id
@@ -679,3 +681,100 @@ def test_figure_never_inserted_above_a_summary_titled_heading():
     assert out.startswith("## Summary of CPU Scheduling")
     assert out.index("assets/A-001-f1") < out.index("Check your understanding")
     assert insert_before_closing("## Summary\n\nBody.", "X").startswith("## Summary")
+
+
+# ---------- topic layout (one flat book across every PDF) ----------
+
+def test_topic_target_scales_with_slides_beyond_a_chapters_ceiling():
+    from backend.pipeline.outline import target_sections
+    assert target_sections(250, per_section=4) == 12                      # chapter default: capped at 12
+    assert target_sections(250, per_section=5, minimum=2, maximum=80) == 50
+    assert target_sections(3, per_section=5, minimum=2, maximum=80) == 2
+
+
+def test_fallback_outline_groups_runs_without_crossing_pdfs():
+    from backend.pipeline.outline import fallback_outline
+    ids = [f"A·{i}" for i in range(1, 8)] + [f"B·{i}" for i in range(1, 4)]
+    extracts = {sid: _extract(f"Topic {sid}", "content", []) for sid in ids}
+    extracts["A·1"] = _extract("Course intro", "title", [])
+    out = fallback_outline("Book", ids, extracts, per_section=3)
+    assert [s.slides for s in out.sections] == [["A·2", "A·3", "A·4"], ["A·5", "A·6", "A·7"],
+                                                ["B·1", "B·2", "B·3"]]
+    assert out.filler == ["A·1"] and out.sections[0].title == "Topic A·2"
+
+
+def test_topic_layout_survives_a_failed_outline_call(chapter_pdfs, monkeypatch, capsys):
+    import backend.pipeline.run as run
+    from backend.llm.client import LLMError
+    from backend.pipeline.outline import Outline
+
+    class OutlineDown(FakeLLM):
+        def structured(self, messages, schema, **kw):
+            if schema is Outline:
+                raise LLMError("model down")
+            return super().structured(messages, schema, **kw)
+
+    monkeypatch.setattr(run, "stage_llm", lambda stage, backend=None: OutlineDown())
+    chapter = Chapter("Book fallback", chapter_pdfs)
+    doc = run.convert_chapter(chapter, ["learner"], by_topic=True)["learner"].read_text()
+    assert "outline failed" in capsys.readouterr().out
+    assert doc.count("<!-- slides ") >= 2          # still a multi-section book, named after each run's first slide
+    assert "Chapter 1" not in doc and "- [Recap" in doc
+
+
+def test_spend_cap_is_not_swallowed_by_the_outline_fallback(chapter_pdfs, monkeypatch):
+    import backend.pipeline.run as run
+    from backend.llm.usage import BudgetExceeded
+    from backend.pipeline.outline import Outline
+
+    class CapHit(FakeLLM):
+        def structured(self, messages, schema, **kw):
+            if schema is Outline:
+                raise BudgetExceeded("cap")
+            return super().structured(messages, schema, **kw)
+
+    monkeypatch.setattr(run, "stage_llm", lambda stage, backend=None: CapHit())
+    with pytest.raises(BudgetExceeded):
+        run.convert_chapter(Chapter("Capped", chapter_pdfs), ["learner"], by_topic=True)
+
+
+def test_summary_keeps_the_learner_sections_title():
+    from backend.pipeline.summarize import keep_heading
+    learner = "## Paging Fundamentals: Motivation, Structure, and Translation\n\nLong notes."
+    assert keep_heading("## Paging Fundamentals\n\n- point", learner) == (
+        "## Paging Fundamentals: Motivation, Structure, and Translation\n\n- point")
+    assert keep_heading("- point without a heading", learner).startswith("## Paging Fundamentals: Motivation")
+    assert keep_heading("## Short\n\n- point", "No heading here") == "## Short\n\n- point"   # nothing to keep
+    assert keep_heading("### Deeper\n\n- p", "### Part title\n\nx") == "### Part title\n\n- p"
+
+
+def test_empty_readings_are_rejected_not_cached():
+    from backend.pipeline.extract import is_empty_reading
+
+    class S:  # just enough of a Slide: its text layer
+        def __init__(self, text):
+            self.text = text
+
+    wordy = S("Page table is array of page table entries, one per page of process and more")
+    blank = _extract("Page Table Entry (invented title)", "content").model_copy(update={"bullets": []})
+    assert is_empty_reading(blank, wordy)                                  # valid JSON, nothing in it, text on the slide
+    assert not is_empty_reading(blank, S("Figure only"))                   # almost no text: a figure slide may be empty
+    assert not is_empty_reading(blank.model_copy(update={"slide_role": "title"}), wordy)   # title slides are sparse
+    assert not is_empty_reading(_extract("Paging", "content"), wordy)       # has a bullet
+
+
+def test_code_slides_are_not_transcribed_twice():
+    from backend.pipeline.extract import CodeBlock, drop_code_duplicates
+
+    listing = CodeBlock(language="assembly", code=".byte 0\n.section .debug_aranges,\"\",\n  @progbits\n.long 0x2c")
+    bullets = [".byte 0", '.section .debug_aranges,"", @progbits', ".long 0x2c", "Debug sections describe address ranges"]
+    kept, code = drop_code_duplicates(bullets, [listing])
+    assert kept == ["Debug sections describe address ranges"] and code == [listing]   # echoes gone, prose kept
+    # short bullets and bullets that merely share words with the code are never dropped
+    assert drop_code_duplicates(["ret", "uses .byte"], [listing])[0] == ["ret", "uses .byte"]
+    # lone inline identifiers tagged as code blocks are dropped when the slide has prose bullets...
+    word = CodeBlock(language="lisp", code="eval")
+    assert drop_code_duplicates(["Evaluators use eval and apply"], [word])[1] == []
+    # ...but a real one-liner, or a code-only slide, keeps its block
+    assert drop_code_duplicates(["x"], [CodeBlock(language="sh", code="ls -l")])[1][0].code == "ls -l"
+    assert drop_code_duplicates([], [word])[1] == [word]
