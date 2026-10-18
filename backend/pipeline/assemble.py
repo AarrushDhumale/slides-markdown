@@ -11,7 +11,8 @@ from backend.pipeline.chapter import SEP, Chapter, Slide, slide_file_id
 from backend.pipeline.extract import SlideExtract, figure_assets
 from backend.pipeline.outline import GROUPED_MODES, MODE_SUFFIX, Outline
 
-LEVEL_LABELS = {"proficient": "Proficient", "learner": "Learner", "dockey": "Dockey", "summary": "Summary"}
+LEVEL_LABELS = {"proficient": "Proficient", "learner": "Learner", "donkey": "Donkey", "notes": "Notes",
+                "summary": "Summary"}
 ASSET_RE = re.compile(r"assets/([A-Z]+-\d{3}(?:-f\d+)?)\.png")
 FENCE_RE = re.compile(r"^(```|~~~)")
 
@@ -364,7 +365,8 @@ def drop_repeat_images(md: str, shown_earlier: set[str] | dict[str, str]) -> str
 
 def assemble(chapter: Chapter, outline: Outline, sections_md: list[str], level: str,
              slides: list[Slide], extracts: dict[str, SlideExtract] | None = None,
-             takeaways: str = "") -> Path:
+             takeaways: str = "", exam_tags: dict[int, list[str]] | None = None,
+             stars: set[int] = frozenset()) -> Path:
     by_file_id = {slide_file_id(s.id): s for s in slides}
     assets = chapter.dir / "assets"
     assets.mkdir(exist_ok=True)
@@ -373,7 +375,8 @@ def assemble(chapter: Chapter, outline: Outline, sections_md: list[str], level: 
     slides_by_id = {s.id: s for s in slides}
     shown: dict[str, str] = {}  # asset -> heading of the section that first showed it
     body, headings = [], []
-    for sec, md in zip(outline.sections, sections_md):
+    starred: set[str] = set()   # headings of high-yield sections, starred in the contents
+    for idx, (sec, md) in enumerate(zip(outline.sections, sections_md)):
         md = normalize_section(md, sec.title)
         if outline.mode == "slides":  # fixed "Slide N · Title" headings: other sections link to them
             md = re.sub(r"\A## .*", lambda _: f"## {sec.title}", md, count=1)
@@ -385,6 +388,11 @@ def assemble(chapter: Chapter, outline: Outline, sections_md: list[str], level: 
         if not md.startswith("## "):  # every part needs its heading, whatever clean-up removed
             md = f"## {sec.title}\n\n{md.lstrip()}"
         heading = re.match(r"## (.+)", md).group(1).strip()
+        if exam_tags and exam_tags.get(idx):   # past papers: which exams asked about this topic
+            from backend.pipeline.papers import exam_tag_line
+            md = re.sub(r"\A(#{2,3} .*\n)\n*", lambda m: m.group(1) + "\n" + exam_tag_line(exam_tags[idx], idx in stars) + "\n\n", md, count=1)
+            if idx in stars:
+                starred.add(heading)
         md = drop_repeat_images(md, shown)
         for n in ASSET_RE.findall(md):
             shown.setdefault(f"assets/{n}.png", heading)
@@ -403,7 +411,8 @@ def assemble(chapter: Chapter, outline: Outline, sections_md: list[str], level: 
                     f"<!-- slides {compress_ids(sec.slides)} -->\n{md}")
     if outline.mode == "chapters":  # chapter-wise doc: the contents list shows chapters only
         headings = [hd for hd in headings if hd[0] == 2]
-    toc = "\n".join(f"{'  ' * (lvl - 2)}- [{h}](#{anchor(h)})" for lvl, h, _ in headings)
+    toc = "\n".join(f"{'  ' * (lvl - 2)}- [{h}](#{anchor(h)})" + (" ★" if h in starred else "")
+                    for lvl, h, _ in headings)
     parts = [
         f"# {outline.chapter_title}",
         f"> **Level:** {LEVEL_LABELS[level]} · **Sources:** {sources}",

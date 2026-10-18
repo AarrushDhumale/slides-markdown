@@ -171,8 +171,8 @@ class Worker:
         root = self.notebook_dir(nb)
         chapter = WebChapter(title, self.fetch_sources(nb), root=root)
         levels = list(job["levels"])
-        if "summary" in levels and "learner" not in levels:
-            levels.append("learner")  # written anyway to make the summary; the quiz comes from it
+        if {"summary", "notes"} & set(levels) and "learner" not in levels:
+            levels.append("learner")  # written anyway to make the summary/notes; the quiz comes from it
         last = [0.0]
 
         def progress(stage: str, done: int, total: int) -> None:

@@ -13,14 +13,14 @@ from backend.llm.usage import BudgetExceeded
 from backend.paths import PROMPTS_DIR
 from backend.pipeline.assemble import (check_markdown, degeneration, missing_slides, resolve_asset,
                                        strip_degenerate)
-from backend.pipeline.chapter import Chapter, Slide, slide_file_id
+from backend.pipeline.chapter import Chapter, Slide, slide_file_id, cache_root
 from backend.pipeline.extract import SlideExtract, figure_assets
 from backend.pipeline.outline import MODE_DIRS, Outline, Section
 
 MAX_WRITER_IMAGES = 6
 IMAGE_RE = re.compile(r"!\[[^\]]*\]\(assets/[^)]+\)")
 # target words per word of slide content; bounds keep tiny/huge sections sensible
-LENGTH_FACTOR = {"proficient": 0.6, "learner": 1.1, "dockey": 1.3}
+LENGTH_FACTOR = {"proficient": 0.6, "learner": 1.1, "donkey": 1.3}
 OVERSHOOT_LIMIT = 1.35    # sections longer than this x budget get one "tighten" pass
 MIN_WORDS, MAX_WORDS = 120, 900                   # topic sections
 SLIDE_MIN_WORDS, SLIDE_MAX_WORDS = 50, 400        # per-slide mode
@@ -56,7 +56,7 @@ def system_prompt(level: str, mode: str = "sections") -> str:
 
 
 def cache_dir(chapter: Chapter, outline: Outline, level: str):
-    return chapter.dir / MODE_DIRS[outline.mode] / level
+    return cache_root(chapter) / MODE_DIRS[outline.mode] / level
 
 
 def section_input(outline: Outline, idx: int, extracts: dict[str, SlideExtract],

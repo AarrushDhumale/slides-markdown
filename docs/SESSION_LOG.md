@@ -1,4 +1,4 @@
-# Session log: web app, hosted models, topic book, model comparison (Oct 2026)
+# Session log: web app, hosted models, topic book, model comparison, Notes level, past papers (Oct 2026)
 
 A handoff for starting a fresh session without re-deriving any of this. Read in this order: **`CLAUDE.md`** (auto-loaded; working rules and traps) → this file (what happened, current state, what's open) → `docs/PROJECT_GUIDE.md` (architecture and why each framework) → `docs/MODEL_COMPARISON.md` (measured model results).
 
@@ -8,10 +8,10 @@ A handoff for starting a fresh session without re-deriving any of this. Read in 
 |---|---|
 | Branch | `web-app` (not merged, not pushed). `main` is still the original commit `f441a43`. |
 | Commits on `web-app` | `5e55c5d` web app + hosted-API model layer + "Explain this" · `f7c1242` project guide · `288e193` topic book, book reader, measured model comparison |
-| Uncommitted | `.env.example`: your fix of a stray word typed in front of `GEMINI_API_KEY` (the committed copy has the typo). `.vscode/` is the editor's folder, never committed. |
+| Uncommitted | Everything from session 2 (section 10 below): Notes level, dockey→donkey, `.cache/` layout, past papers, bake-off images, migration 002, plus the `.env.example` typo fix. `.vscode/` is the editor's folder, never committed. Commit only when asked. |
 | Running | Nothing. Local Supabase (Docker), dev server and worker are all stopped. |
-| Tests | `.venv/bin/pytest -q`: **77 pass** · `cd web && corepack pnpm@9.15.4 test`: **10 pass** · typecheck and `next build` pass |
-| Secrets | `OPENROUTER_API_KEY` is in `.env` (gitignored, mode 600). It was once pasted into the tracked `.env.example`, was moved, and was never committed. Spend so far: **$0.088 of the key's $10 limit**. No Gemini key exists. Keys never go in `.env.example`. |
+| Tests | `.venv/bin/pytest -q`: **84 pass** · `cd web && corepack pnpm@9.15.4 test`: **10 pass** · typecheck and `next build` pass |
+| Secrets | `OPENROUTER_API_KEY` is in `.env` (gitignored, mode 600). It was once pasted into the tracked `.env.example`, was moved, and was never committed. Spend so far: about **$0.17 of the key's $10 cap**, but the OpenRouter account has **$0 purchased credits** (free tier), so bursts of requests fail with 402 `in_flight_budget_exhausted` (see section 10). No Gemini key exists. Keys never go in `.env.example`. |
 
 ## 2. What was asked, in order, and what was built
 
@@ -61,7 +61,8 @@ Nine hard pages from three decks for readers; three sections of the Paging deck 
 1. Close the reading-error blind spot: stop the writer repeating exact numeric or positional detail from a figure description unless it's in the slide text, and/or cross-read number-heavy slides with a second model and flag disagreements.
 2. Both writers overshoot the length budget even after the tighten pass (the user prefers short notes).
 3. Deployment: hosted Supabase (run `001_init.sql`, enable anonymous sign-ins), Vercel (root dir `web`), a worker host; later Google sign-in linked to the anonymous user, durable cache mirroring to Storage, a slide pane that follows scrolling.
-4. Decide whether to merge/push `web-app`; commit the `.env.example` fix.
+4. Decide whether to merge/push `web-app`; commit the pending work (section 10) and the `.env.example` fix.
+5. **Frontend next** (user's stated next step): see "Starting the frontend next session" in section 10. Also pending: add OpenRouter credits and re-run the bigger bake-offs; try past papers on real PDFs; show the past-paper analysis in the web app.
 
 ## 7. How to resume
 
@@ -86,3 +87,37 @@ cd web && corepack pnpm@9.15.4 dev                   # needs web/.env.local (see
 
 ## 9. User preferences seen this session
 Terse, blunt feedback; wants a plan before big builds; wants things robust and costs compared with real tables; no sign-in yet; two panes; book-style reading; chapter-wise stays the CLI default; commit only when asked (`CLAUDE.md`); "Beyond the slides" for anything not on a slide. Earlier plan files exist at `~/.claude/plans/` but are superseded by `docs/PROJECT_GUIDE.md`.
+
+## 10. Session 2 (Oct 17-19, 2026): what changed, what was measured, where to start the frontend
+
+**Asked, in order:** images in the bake-off outputs; a Notes section; whether past papers help (then: build it, as a CLI content analysis before any web work); Dockey→Donkey; clean up junk Markdown; then re-run the writer bake-off and test on bigger/other PDFs.
+
+**Built (all uncommitted on `web-app`)**
+- **Bake-off images** (`eval/bakeoff.py`): `render_section` runs the real-doc clean-up, copies crops to `write/assets/`, drops broken links and adds a collapsed "Source slides" block (`write/slides/`). New `--spread` samples sections evenly across a deck. Tested offline.
+- **Notes level:** `notes` = short lecture notes condensed from the learner doc (`prompts/notes.md`, learner words ÷ 4 clamped 80-400, up to 3 diagrams, no takeaways). `summarize.py` now has `STYLES` (`summary`, `notes`); `run.CONDENSED` = levels that need the learner sections. Web: "Lecture notes" card (`studio.tsx`), label in `reader.tsx`, `limits.ts`, jobs route, `notebook-view.tsx`.
+- **Dockey → Donkey:** renamed everywhere (prompt, level key, labels, tests, docs); `s2m ... --level dockey` still works as an alias. The web button text is still "Explain simply". `data/chapters/paging/dockey.md` was renamed to `donkey.md`.
+- **Migration `supabase/migrations/002_notes_donkey.sql`:** widens `documents.level` (adds `notes`, `donkey`), renames existing `dockey` rows and `jobs.levels`. **Not applied anywhere yet** (the local Supabase is stopped, no hosted project).
+- **Cache layout:** generated-prose caches now live in a hidden `data/chapters/<slug>/.cache/` (`chapter.cache_root()`, `migrate_cache()` runs from `Chapter.ingest()`). All existing chapters were migrated, nothing regenerated. Chapter folders now show only docs + `assets/` + `chapter.json` (+ `extracts.json`/`slides.json` which the worker reads).
+- **Deleted at the user's request:** `data/chapters/os-combined`, `os-folder`, `11-paging` (same PDF as `paging`), and the old `eval/results/11 - Paging/write/`.
+- **Past papers (`backend/pipeline/papers.py`, `prompts/paper.md`, `paper_map.md`; CLI only):**
+  - Input: `data/inbox/<chapter>/papers/*.pdf` or `s2m convert ... --papers a.pdf b.pdf`. Typed or scanned. Files named `solution|soln|answer|key` are paired with the matching paper; **no model writes solutions**.
+  - Reads each page with the vision reader (cached under the PDF's cache dir), joins questions split across pages, maps each question to outline sections (one cached text call per paper, `.cache/papers-map-*.json`), then writes `papers.json` + `papers.md` (topics ranked by marks, question types, repeats, near-duplicates, questions the slides don't cover, every question with its official solution).
+  - Every doc level gets `> **Asked in:** Midsem 2023 Q4 (8 m) · ...` under asked topics, and a ★ on the top quarter by marks. Added at assembly only (`assemble(..., exam_tags, stars)`), so prose caches are untouched.
+  - Verified **only with synthetic papers and a fake model**. No real paper has been read yet; the user will add PDFs to `data/inbox/<chapter>/papers/`.
+
+**Measured (writer bake-off, DeepSeek V3.2 vs Qwen3.5-35B, reader held fixed; tiny samples)**
+- *11 - Paging* (3 of 8 sections): DeepSeek 902 words vs 640 budget, $0.0015, 45 s; Qwen 1130 vs 640, $0.0088, 56 s. Qwen copies the reader's figure descriptions into the prose, merged the Valid and Present bits, and left one section without a quiz. DeepSeek flagged its one outside-the-slides remark correctly.
+- *12 - Demand Paging* (4 sections): DeepSeek finished 4/4 (1213 vs 880 words, $0.0068, 180 s); Qwen finished 2/4 (402 on the other two). On the two shared sections the length overshoot was similar (1.4-1.65x) and Qwen again narrated a figure walkthrough; DeepSeek's quiz covered all three fault cases.
+- **Both writers overshoot the word budget on every deck tested (1.2-2.4x, quiz and answers included)**; the tighten pass does not fix it. This is open item 2 below.
+- Conclusion so far: DeepSeek stays the default writer. Accuracy was judged by reading notes against the reader's extracts, **not against the slide images**.
+
+**Blocked: OpenRouter credits.** The account shows `total_credits: 0` (free tier); the key's $10 limit is only a cap. Requests fail with 402 `in_flight_budget_exhausted` when several are in flight (the 287-slide OS run lost 228/278 reads; `lecture-13_Class` fully failed). About 50 of those readings are cached for the OpenRouter reader. **Next step: add credits at openrouter.ai/settings/credits** (about $5), or lower `max_concurrency` to 1 in `backends.yaml`. Then re-run: `.venv/bin/python eval/bakeoff.py "data/inbox/OS Slides Combined 1-12.pdf" --stage write --reader openrouter_qwen35 --writers deepseek_v32,openrouter_qwen35 --sections 12 --spread` (about $0.55) and the `lecture-13_Class` deck. Results go to `eval/results/<deck>/write/`.
+
+### Starting the frontend next session
+The user wants to work on the frontend (`web/`) next. Read `CLAUDE.md` "Web app" first, then this list.
+1. **Layout in place:** two panes (sources + Studio cards left, reader right); Summary default; cards in `web/components/studio.tsx` (`ACTIONS`: Summary, Lecture notes, Learner notes, Revision sheet, Explain simply, Quiz). The grid is `grid-cols-2` with Summary spanning two columns, so with Notes there are 7 cells and Quiz sits alone on the last row. Needs a layout decision.
+2. **Naming:** the Donkey level's button still reads "Explain simply"; ask whether it should say "Donkey".
+3. **Past papers have no web UI.** The data exists as `papers.json` / `papers.md` in the chapter dir. Ideas the user asked about: an "Asked in" badge/★ in the reader and contents (the tag line is already in the Markdown), a practice mode (question, reveal official solution, link to the topic), a topic-ranking view. Needs: upload slot for papers, worker support (`backend/worker.py` currently never sets `Chapter.papers`; it would also need to upload `papers.json`), a `documents`/Storage entry, and a migration. Decide the data path before building UI.
+4. **Apply migration 002** before testing Notes/Donkey in the web app (local Supabase: `supabase start`, then `supabase db reset` or apply the file).
+5. **The reader** (`web/components/reader.tsx`, `web/lib/book.ts`) shows Markdown as a book; the Notes docs keep up to 3 diagrams per section, so check how they look in the page view. Slide chips, the Explain popover and quiz extraction (`backend/pipeline/quiz.py` parses the learner doc) are unchanged.
+6. Web checks: `cd web && corepack pnpm@9.15.4 typecheck && corepack pnpm@9.15.4 test && corepack pnpm@9.15.4 build` all passed at the end of this session. A live browser check of the new Notes card has **not** been done.

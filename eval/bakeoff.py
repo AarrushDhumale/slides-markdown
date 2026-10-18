@@ -33,8 +33,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from backend.llm import usage  # noqa: E402
 from backend.llm.client import make_llm  # noqa: E402
 from backend.paths import PROJECT_ROOT, PROMPTS_DIR  # noqa: E402
-from backend.pipeline.assemble import check_markdown, degeneration, missing_slides  # noqa: E402
-from backend.pipeline.chapter import Chapter, build_slides  # noqa: E402
+from backend.pipeline.assemble import (  # noqa: E402
+    ASSET_RE, check_markdown, compress_ids, degeneration, drop_repeat_images, ensure_essential_figures,
+    missing_slides, normalize_section, resolve_asset, shorten_alt_text)
+from backend.pipeline.chapter import Chapter, build_slides, migrate_cache, slide_file_id  # noqa: E402
 from backend.pipeline.extract import extract_all, extract_slide  # noqa: E402
 from backend.pipeline.outline import build_outline  # noqa: E402
 from backend.pipeline.run import TOPIC_LAYOUT  # noqa: E402
@@ -92,6 +94,36 @@ def issues(m: dict) -> list[str]:
     if m["of_budget"] and m["of_budget"] > 1.35:
         out.append(f"{m['of_budget']}x over budget")
     return out
+
+
+def render_section(md: str, sec, extracts: dict, slides_by_id: dict, by_file_id: dict, shown: dict,
+                   out_dir: Path) -> str:
+    """Make a writer's section viewable: the same clean-up the real docs get (essential figures added,
+    repeat images linked), the images copied to out_dir/assets, and the source slides in a collapsed block."""
+    md = normalize_section(md, sec.title)
+    md = shorten_alt_text(ensure_essential_figures(md, sec.slides, extracts, slides_by_id, shown))
+    md = drop_repeat_images(md, shown)
+    assets = out_dir / "assets"
+    assets.mkdir(exist_ok=True)
+    for name in set(ASSET_RE.findall(md)):
+        src = resolve_asset(name, by_file_id)
+        if src and src.exists():
+            shutil.copyfile(src, assets / f"{name}.png")
+            shown.setdefault(f"assets/{name}.png", sec.title)
+        else:  # an invented path: drop the broken image rather than show it
+            md = re.sub(rf"!\[[^\]]*\]\(assets/{re.escape(name)}\.png\)\n?", "", md)
+    slide_dir = out_dir / "slides"
+    slide_dir.mkdir(exist_ok=True)
+    thumbs = []
+    for sid in sec.slides:
+        if sid in slides_by_id:
+            fid = slide_file_id(sid)
+            shutil.copyfile(slides_by_id[sid].image_path, slide_dir / f"{fid}.png")
+            thumbs.append(f'<img src="slides/{fid}.png" alt="{sid}" width="320">')
+    if thumbs:
+        md += (f"\n\n<details><summary>Source slides {compress_ids(sec.slides)}</summary>\n\n"
+               + "\n".join(thumbs) + "\n\n</details>")
+    return md
 
 
 def extract_stage(args) -> dict[str, dict]:
@@ -152,8 +184,14 @@ def write_stage(args) -> list[dict]:
     reader = make_llm(args.reader, "extract")
     extracts = extract_all(slides, reader)
     outline = build_outline(chapter, slides, extracts, make_llm(names[0], "outline"), reader.model_id, **TOPIC_LAYOUT)
-    picks = [i for i, s in enumerate(outline.sections) if s.kind == "content"][: args.sections]
+    content = [i for i, s in enumerate(outline.sections) if s.kind == "content"]
+    if getattr(args, "spread", False) and len(content) > args.sections:  # evenly across the deck, not just its start
+        step = len(content) / args.sections
+        picks = [content[int(k * step + step / 2)] for k in range(args.sections)]
+    else:
+        picks = content[: args.sections]
     slides_by_id = {s.id: s for s in slides}
+    by_file_id = {slide_file_id(s.id): s for s in slides}
     print(f"{len(outline.sections)} topic sections; writing {len(picks)}: "
           + "; ".join(outline.sections[i].title for i in picks))
 
@@ -161,10 +199,12 @@ def write_stage(args) -> list[dict]:
     for name in names:
         llm = make_llm(name, "write")
         writer_chapter = ScratchChapter(pdf.stem, [pdf], root=out_dir / name)
+        migrate_cache(writer_chapter)   # results from before caches moved to .cache/ stay cache hits
         job = f"bakeoff:{run}:write:{name}"
         usage.set_job(job)
         t0 = time.time()
         parts, section_rows = [], []
+        shown: dict[str, str] = {}   # image -> section that first showed it (per writer, like one document)
         for i in picks:
             sec = outline.sections[i]
             try:
@@ -172,6 +212,7 @@ def write_stage(args) -> list[dict]:
                 if not args.no_review:
                     md = review_section(md, outline, i, args.level, extracts, llm, writer_chapter)
                 m = section_metrics(md, section_budget(outline, i, args.level, extracts), sec.slides, extracts)
+                md = render_section(md, sec, extracts, slides_by_id, by_file_id, shown, out_dir)
             except Exception as e:
                 md, m = f"_FAILED: {type(e).__name__}: {e}_", None
             section_rows.append(m)
@@ -213,7 +254,8 @@ def main(argv=None) -> None:
     ap.add_argument("--reader", help="write: backend whose extracts every writer gets")
     ap.add_argument("--writers", help="write: comma list of backend names")
     ap.add_argument("--sections", type=int, default=2, help="write: how many topic sections to write (default 2)")
-    ap.add_argument("--level", default="learner", choices=["proficient", "learner", "dockey"])
+    ap.add_argument("--spread", action="store_true", help="write: pick the sections evenly across the deck")
+    ap.add_argument("--level", default="learner", choices=["proficient", "learner", "donkey"])
     ap.add_argument("--no-review", action="store_true", help="write: skip the fact-check pass")
     ap.add_argument("--out", type=Path, default=RESULTS, help="results folder (default eval/results)")
     args = ap.parse_args(argv)

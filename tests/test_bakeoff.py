@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,6 +36,12 @@ def test_write_stage_compares_writers_on_the_same_outline(chapter_pdfs, monkeypa
     assert "| writer_a |" in summary and "| writer_b |" in summary and "words / budget" in summary
     assert writers["writer_a"].reviews == writers["writer_b"].reviews == n   # drafted, then fact-checked
     assert "topic sections" in capsys.readouterr().out
+    # every image a writer's file links to exists next to it, and the source slides are shown
+    for name in ("writer_a", "writer_b"):
+        text = (out / f"{name}.md").read_text()
+        for ref in re.findall(r"!\[[^\]]*\]\(([^)]+)\)", text):
+            assert (out / ref).exists(), ref
+        assert "<details><summary>Source slides" in text and (out / "slides").is_dir()
 
 
 def test_extract_stage_reports_per_backend_cost_and_writes_side_by_side_files(chapter_pdfs, monkeypatch, tmp_path, capsys):

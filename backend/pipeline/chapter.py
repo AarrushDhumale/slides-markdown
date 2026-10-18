@@ -19,6 +19,34 @@ from backend.paths import CHAPTERS_DIR, INBOX_DIR
 from backend.pipeline.ingest import FigureCrop, IngestedPdf, ingest_pdf, same_figure
 
 SEP = "·"
+CACHE_DIRNAME = ".cache"
+
+
+def cache_root(chapter) -> Path:
+    """Where a chapter keeps generated-prose caches (sections, outlines, overlaps): a hidden folder, so the
+    chapter dir shows only the finished docs. Takes anything with a `.dir`; created on first use."""
+    root = Path(chapter.dir) / CACHE_DIRNAME
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+_LEGACY_CACHE = re.compile(r"^(sections(-by-\w+)?|outline[\w-]*\.json|overlap[\w-]*\.json|chapters\.json)$")
+
+
+def migrate_cache(chapter) -> int:
+    """Move caches from the old layout (next to the docs) into `.cache/`; returns how many were moved.
+    They keep working as cache hits, so nothing is regenerated."""
+    base = Path(chapter.dir)
+    if not base.is_dir():
+        return 0
+    moved = 0
+    for entry in sorted(base.iterdir()):
+        if _LEGACY_CACHE.match(entry.name):
+            target = cache_root(chapter) / entry.name
+            if not target.exists():
+                entry.rename(target)
+                moved += 1
+    return moved
 
 
 def slugify(name: str) -> str:
@@ -74,6 +102,7 @@ class Slide:
 class Chapter:
     name: str
     pdf_paths: list[Path]
+    papers: list[Path] = field(default_factory=list)   # past-year papers (and solutions): analysed, not summarised
 
     @property
     def slug(self) -> str:
@@ -86,6 +115,7 @@ class Chapter:
     def ingest(self) -> list[IngestedPdf]:
         pdfs = [ingest_pdf(p) for p in self.pdf_paths]
         self.dir.mkdir(parents=True, exist_ok=True)
+        migrate_cache(self)
         manifest_path = self.dir / "chapter.json"
         manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {"created": time.time()}
         manifest.update({
@@ -201,7 +231,7 @@ def discover_inbox(inbox: Path = INBOX_DIR) -> list[Chapter]:
         if entry.is_dir():
             pdfs = sorted(entry.glob("*.pdf"), key=natural_key)
             if pdfs:
-                chapters.append(Chapter(entry.name, pdfs))
+                chapters.append(Chapter(entry.name, pdfs, papers=sorted((entry / "papers").glob("*.pdf"), key=natural_key)))
         elif entry.suffix.lower() == ".pdf":
             chapters.append(Chapter(entry.stem, [entry]))
     return chapters

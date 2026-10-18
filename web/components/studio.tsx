@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, BookOpen, CircleHelp, FileText, ListChecks, Loader2, Plus, Smile, WifiOff, Zap } from "lucide-react";
+import { AlertTriangle, BookOpen, CircleHelp, FileText, ListChecks, Loader2, PencilLine, Plus, Smile, WifiOff, Zap } from "lucide-react";
 
 import { Dropzone } from "@/components/dropzone";
 import { Button } from "@/components/ui/button";
@@ -8,13 +8,14 @@ import type { Doc, Job, Source, WorkerStatus } from "@/lib/client";
 import { cn } from "@/lib/cn";
 import { LIMITS } from "@/lib/limits";
 
-export type View = "summary" | "learner" | "proficient" | "dockey" | "quiz";
+export type View = "summary" | "notes" | "learner" | "proficient" | "donkey" | "quiz";
 
 export const ACTIONS: { key: View; label: string; hint: string; icon: typeof Zap; level: string }[] = [
   { key: "summary", label: "Summary", hint: "The short version", icon: Zap, level: "summary" },
+  { key: "notes", label: "Lecture notes", hint: "Short, with key diagrams", icon: PencilLine, level: "notes" },
   { key: "learner", label: "Learner notes", hint: "Full explanations", icon: BookOpen, level: "learner" },
   { key: "proficient", label: "Revision sheet", hint: "Dense, for revising", icon: ListChecks, level: "proficient" },
-  { key: "dockey", label: "Explain simply", hint: "Like I'm five", icon: Smile, level: "dockey" },
+  { key: "donkey", label: "Explain simply", hint: "Like I'm five", icon: Smile, level: "donkey" },
   { key: "quiz", label: "Quiz", hint: "Test yourself", icon: CircleHelp, level: "learner" },
 ];
 
@@ -26,7 +27,8 @@ const STAGES: Record<string, string> = {
   outline: "Grouping slides into topics",
   "write:learner": "Writing learner notes",
   "write:proficient": "Writing the revision sheet",
-  "write:dockey": "Writing the simple version",
+  "write:donkey": "Writing the simple version",
+  notes: "Writing lecture notes",
   summary: "Summarising",
   done: "Finishing",
 };

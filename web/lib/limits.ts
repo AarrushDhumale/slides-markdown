@@ -11,5 +11,5 @@ export const LIMITS = {
   workerFreshMs: 60_000,
 };
 
-export const LEVELS = ["summary", "learner", "proficient", "dockey"] as const;
+export const LEVELS = ["summary", "notes", "learner", "proficient", "donkey"] as const;
 export type Level = (typeof LEVELS)[number];

@@ -11,7 +11,7 @@ export const POST = route(async (req) => {
     (LEVELS as readonly string[]).includes(l),
   );
   if (!wanted.length) throw new HttpError(400, "Choose what to generate");
-  if (wanted.includes("summary") && !wanted.includes("learner")) wanted.push("learner");
+  if ((wanted.includes("summary") || wanted.includes("notes")) && !wanted.includes("learner")) wanted.push("learner");
 
   const db = admin();
   const { count: sources } = await db

@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from backend.llm.client import LLM
 from backend.llm.usage import BudgetExceeded
 from backend.paths import PROMPTS_DIR
-from backend.pipeline.chapter import SEP, Chapter, Slide
+from backend.pipeline.chapter import SEP, Chapter, Slide, cache_root
 from backend.pipeline.extract import SlideExtract
 from backend.pipeline.outline import FILLER_ROLES
 
@@ -136,7 +136,7 @@ def detect_chapters(chapter: Chapter, slides: list[Slide], extracts: dict[str, S
     prompt = (PROMPTS_DIR / "chapters.md").read_text()
     user = (f"Total teaching slides: {_teaching(slides, extracts)}\n\nSlides:\n{_listing(slides, extracts)}")
     key = hashlib.sha256(f"{prompt}\n{user}\n{llm.model_id}".encode()).hexdigest()[:16]
-    path = chapter.dir / "chapters.json"
+    path = cache_root(chapter) / "chapters.json"
     starts: list[ChapterStart] | None = None
     if path.exists():
         cached = json.loads(path.read_text())

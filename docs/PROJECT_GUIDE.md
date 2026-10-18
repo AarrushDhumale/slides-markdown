@@ -29,7 +29,7 @@ Lecture decks are written to be presented, not read. This project reads a deck t
 | **summary** | The shortest version: key takeaways plus a few dense bullets per section. Condensed *from* the learner notes. |
 | **learner** | The main document: full explanations for a college student new to the topic, with an end-of-chapter quiz. |
 | **proficient** | A dense revision sheet that assumes familiarity. |
-| **dockey** | "Explain like I'm five": analogies first, formal material tucked into collapsible blocks. |
+| **donkey** | "Explain like I'm five": analogies first, formal material tucked into collapsible blocks. |
 
 It exists in two forms that share one engine:
 

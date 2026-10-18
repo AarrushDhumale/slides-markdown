@@ -31,9 +31,10 @@ type Mode = "book" | "scroll";
 
 const LEVEL_NAMES: Record<string, string> = {
   summary: "Summary",
+  notes: "Lecture notes",
   learner: "Learner notes",
   proficient: "Revision sheet",
-  dockey: "Explain simply",
+  donkey: "Explain simply",
 };
 
 /** Signed URLs for this notebook's generated files (`assets/x.png`, `slides/A-004.webp`), cached. */

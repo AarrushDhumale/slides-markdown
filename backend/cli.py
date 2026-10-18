@@ -20,7 +20,8 @@ from backend.paths import OUTPUTS as LEVELS
 LEVEL_HELP = {
     "proficient": "high-level overview, assumes familiarity, technical terms",
     "learner": "detailed explanations for a college student new to the topic",
-    "dockey": "explain like I'm five: analogies first, formal stuff tucked away",
+    "donkey": "explain like I'm five: analogies first, formal stuff tucked away",
+    "notes": "short lecture notes you could write down, with the key diagrams (from the learner doc)",
     "summary": "concise quick-revision version of the learner doc",
 }
 
@@ -47,7 +48,7 @@ def parse_levels(value: str | None) -> list[str]:
         return ask_levels() if sys.stdin.isatty() else ["learner"]
     if value == "all":
         return list(LEVELS)
-    levels = [v.strip() for v in value.split(",")]
+    levels = [{"dockey": "donkey"}.get(v.strip(), v.strip()) for v in value.split(",")]  # old name still works
     bad = [v for v in levels if v not in LEVELS]
     if bad:
         raise SystemExit(f"unknown level(s): {bad}; choose from {LEVELS} or 'all'")
@@ -93,7 +94,11 @@ def cmd_convert(args):
     if missing:
         raise SystemExit(f"not found: {missing}")
     name = args.chapter or pdfs[0].stem
-    run_chapter(Chapter(name, pdfs), parse_levels(args.level), args.backend, args.open, not args.no_review,
+    papers = [Path(p) for p in args.papers or []]
+    missing = [p for p in papers if not p.is_file()]
+    if missing:
+        raise SystemExit(f"not found: {missing}")
+    run_chapter(Chapter(name, pdfs, papers=papers), parse_levels(args.level), args.backend, args.open, not args.no_review,
                 args.per_slide, args.per_deck, args.by_topic)
 
 
@@ -163,8 +168,10 @@ def main(argv=None):
     c = sub.add_parser("convert", help="convert one chapter (one or more PDFs, in order)")
     c.add_argument("pdfs", nargs="+")
     c.add_argument("--chapter", help="chapter name (default: first PDF's filename)")
-    c.add_argument("--level", help="proficient | learner | dockey | summary | comma list | all (asks if omitted)")
+    c.add_argument("--level", help="proficient | learner | donkey | notes | summary | comma list | all (asks if omitted)")
     c.add_argument("--backend", help="backend from backends.yaml for all stages")
+    c.add_argument("--papers", nargs="+", metavar="PDF",
+                   help="past-year papers (and solution PDFs): adds papers.md and 'Asked in' tags to the docs")
     c.add_argument("--open", action="store_true", help="open the first result when done")
     c.add_argument("--no-review", action="store_true", help="skip the fact-check pass (faster, less faithful)")
     mode = c.add_mutually_exclusive_group()

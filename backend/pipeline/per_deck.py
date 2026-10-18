@@ -21,7 +21,7 @@ from backend.llm.client import LLM
 from backend.llm.usage import BudgetExceeded
 from backend.paths import PROMPTS_DIR
 from backend.pipeline.assemble import anchor
-from backend.pipeline.chapter import SEP, Chapter, Slide, pdf_letter
+from backend.pipeline.chapter import SEP, Chapter, Slide, pdf_letter, cache_root
 from backend.pipeline.extract import SlideExtract, figure_assets
 from backend.pipeline.ingest import IngestedPdf
 from backend.pipeline.outline import Outline, build_outline
@@ -56,7 +56,7 @@ def topic_overlaps(chapter: Chapter, letter: str, earlier: list, current: list,
                                                          for i, s in enumerate(current, 1))
             + "\n\nRefer to sections by number only (S1 -> section 1, E3 -> earlier 3).")
     key = hashlib.sha256(f"{prompt}\n{user}\n{llm.model_id}".encode()).hexdigest()[:16]
-    path = chapter.dir / f"overlap-{letter}.json"
+    path = cache_root(chapter) / f"overlap-{letter}.json"
     if path.exists() and json.loads(path.read_text()).get("key") == key:
         return DeckOverlap.model_validate(json.loads(path.read_text())["result"])
     try:

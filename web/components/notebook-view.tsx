@@ -103,7 +103,7 @@ export function NotebookView({ id }: { id: string }) {
 
   const generate = async (lvl: string) => {
     try {
-      await api("/api/jobs", { notebook_id: id, levels: lvl === "summary" ? ["summary", "learner"] : [lvl] });
+      await api("/api/jobs", { notebook_id: id, levels: lvl === "summary" || lvl === "notes" ? [lvl, "learner"] : [lvl] });
       toast.success("Queued. It'll appear here when it's ready.");
       load();
     } catch (e) {

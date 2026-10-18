@@ -14,5 +14,5 @@ CHAPTERS_DIR = DATA_ROOT / "chapters"
 PROMPTS_DIR = PACKAGE_ROOT / "prompts"
 BACKENDS_FILE = Path(os.environ.get("S2M_BACKENDS", PACKAGE_ROOT / "llm" / "backends.yaml"))
 
-LEVELS = ("proficient", "learner", "dockey")          # written from the slides
-OUTPUTS = LEVELS + ("summary",)                       # summary is condensed from the learner doc
+LEVELS = ("proficient", "learner", "donkey")          # written from the slides
+OUTPUTS = LEVELS + ("notes", "summary")                 # notes and summary are condensed from the learner doc

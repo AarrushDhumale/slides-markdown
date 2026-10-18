@@ -3,9 +3,9 @@
 For the full workflow, architecture and the reasoning behind every framework, see [docs/PROJECT_GUIDE.md](docs/PROJECT_GUIDE.md).
 
 Turns lecture slide PDFs into readable Markdown study docs at three levels:
-**proficient** (revision overview), **learner** (full explanations), **dockey** (explain like I'm five).
-A fourth output, **summary**, is a concise quick-revision version condensed from the learner doc. It has chapter
-key takeaways, then 3–7 dense bullets per section.
+**proficient** (revision overview), **learner** (full explanations), **donkey** (explain like I'm five).
+Two more outputs are condensed from the learner doc: **notes** (short lecture notes you could write down, keeping
+the important diagrams) and **summary** (chapter key takeaways, then 3–7 dense bullets per section).
 
 Several PDFs can form one **chapter** and become one doc. Slides are referenced as `A·12` (first PDF, page 12), `B·3` (second PDF), and so on.
 
@@ -25,8 +25,18 @@ s2m usage                                                  # API tokens and $ th
 s2m server status | up | down
 ```
 
-Output goes to `data/chapters/<chapter>/{proficient,learner,dockey,summary}.md` plus `assets/`.
-`--level summary` reuses saved learner sections when they exist. `--no-review` skips the fact-check pass.
+Output goes to `data/chapters/<chapter>/{proficient,learner,donkey,notes,summary}.md` plus `assets/`.
+`--level notes` and `--level summary` reuse saved learner sections when they exist. `--no-review` skips the fact-check pass.
+Generated caches (sections, outlines, overlaps) live in a hidden `.cache/` inside each chapter folder, so the folder
+shows only the docs. Older chapters are moved there automatically on the next run, with no regeneration.
+
+**Past-year papers.** Put papers (typed or scanned PDFs, and optionally their solution PDFs) in
+`data/inbox/<chapter>/papers/`, or pass `--papers p1.pdf p2.pdf solutions.pdf` to `s2m convert`. A file whose name
+contains `solution`, `soln`, `answer` or `key` is paired with the paper it matches best. Each question is mapped to the
+topics of the notes, and you get `papers.md` (topics ranked by marks, question types, repeated questions, questions the
+slides don't cover, every question with its official solution) and `papers.json`. Every doc also gets an
+`Asked in: Midsem 2023 Q4 (8 m)` line under the topics that were asked, and a ★ on the high-yield ones.
+Solutions are only shown when the paper came with them; none are written by a model.
 
 **Layout: chapter-wise by default.**
 - **Chapter detection.** The course's chapters are detected automatically from title slides, "Lecture/Chapter N" markers, PDF boundaries and subject changes. A combined PDF is split into its chapters, and several PDFs on one subject become one chapter.

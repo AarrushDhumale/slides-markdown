@@ -12,7 +12,7 @@ from pydantic.json_schema import SkipJsonSchema
 from backend.llm.client import LLM
 from backend.llm.usage import BudgetExceeded
 from backend.paths import PROMPTS_DIR
-from backend.pipeline.chapter import SEP, Chapter, Slide
+from backend.pipeline.chapter import SEP, Chapter, Slide, cache_root
 from backend.pipeline.extract import SlideExtract
 
 FULL_DETAIL_CHAR_BUDGET = 300_000  # ~75k tokens; above this the outline sees compact extracts
@@ -227,7 +227,7 @@ def build_outline(chapter: Chapter, slides: list[Slide], extracts: dict[str, Sli
         return one
     key = _cache_key([s.pdf.sha for s in slides if s.page == 1] + order[:1] + order[-1:], extract_model, llm,
                      f"{prompt}\n{target}\n{max_slides}")
-    path = chapter.dir / f"{cache_name}.json"
+    path = cache_root(chapter) / f"{cache_name}.json"
     if path.exists():
         cached = json.loads(path.read_text())
         if cached.get("key") == key:

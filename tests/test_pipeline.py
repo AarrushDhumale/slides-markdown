@@ -231,7 +231,7 @@ def test_end_to_end_with_fake_llm(chapter_pdfs, monkeypatch):
     fake = FakeLLM()
     monkeypatch.setattr(run, "stage_llm", lambda stage, backend=None: fake)
     chapter = Chapter("Week 3", chapter_pdfs)
-    out = run.convert_chapter(chapter, ["learner", "dockey"], by_topic=True)
+    out = run.convert_chapter(chapter, ["learner", "donkey"], by_topic=True)
 
     doc = out["learner"].read_text()
     assert doc.startswith("# Algorithms Week 3")
@@ -246,11 +246,11 @@ def test_end_to_end_with_fake_llm(chapter_pdfs, monkeypatch):
     assert doc.count("](assets/A-003-f1.png)") == 1, "diagram repeated on B·5 is embedded once"
     # per level: section 1 sees A-003-f1; section 2 sees B-003-f1 + A-003-f1 (B·5 repeats it)
     assert fake.writer_images == 6
-    assert out["dockey"].exists()
+    assert out["donkey"].exists()
     assert fake.reviews == 4 and "Beyond the slides:** checked" in doc  # 2 sections x 2 levels reviewed
     manifest = json.loads((chapter.dir / "chapter.json").read_text())
     assert [p["letter"] for p in manifest["pdfs"]] == ["A", "B"]
-    assert set(manifest["levels"]) == {"learner-by-topic", "dockey-by-topic"}
+    assert set(manifest["levels"]) == {"learner-by-topic", "donkey-by-topic"}
 
 
 # ---------- robustness ----------
@@ -521,10 +521,10 @@ def test_per_deck_end_to_end(chapter_pdfs, monkeypatch):
     assert "recap slide(s) here repeat material covered in [Deck 1" in deck2   # B·1 = A·2
     assert doc.count("](assets/A-003-f1.png)") == 1                       # B·5 re-shows deck 1's diagram
     assert "<!-- slides A·" not in deck2                                   # no topic mixes decks
-    assert (chapter.dir / "outline-decks-A.json").exists() and (chapter.dir / "outline-decks-B.json").exists()
+    assert (chapter.dir / ".cache" / "outline-decks-A.json").exists() and (chapter.dir / ".cache" / "outline-decks-B.json").exists()
     recap = [t for t in fake.writer_inputs if "This topic was already explained in 'Complexity' in [Deck 1" in t]
     assert recap and "a worked example" in recap[0]           # semantic overlap reached the writer
-    assert (chapter.dir / "overlap-decks-B.json").exists() and not (chapter.dir / "overlap-decks-A.json").exists()
+    assert (chapter.dir / ".cache" / "overlap-decks-B.json").exists() and not (chapter.dir / ".cache" / "overlap-decks-A.json").exists()
 
 
 def test_per_deck_pure_repeat_becomes_recap(chapter_pdfs, monkeypatch):
@@ -778,3 +778,41 @@ def test_code_slides_are_not_transcribed_twice():
     # ...but a real one-liner, or a code-only slide, keeps its block
     assert drop_code_duplicates(["x"], [CodeBlock(language="sh", code="ls -l")])[1][0].code == "ls -l"
     assert drop_code_duplicates([], [word])[1] == [word]
+
+
+def test_notes_level_is_condensed_from_learner_and_caches_live_in_hidden_dir(chapter_pdfs, monkeypatch):
+    import backend.pipeline.run as run
+
+    fake = FakeLLM()
+    monkeypatch.setattr(run, "stage_llm", lambda stage, backend=None: fake)
+    chapter = Chapter("Notes week", chapter_pdfs)
+    out = run.convert_chapter(chapter, ["notes"], by_topic=True)
+    assert set(out) == {"notes"} and not (chapter.dir / "learner.md").exists()
+    doc = out["notes"].read_text()
+    assert "> **Level:** Notes" in doc and "condensed fact" in doc
+    assert "Key takeaways" not in doc                       # notes carry no chapter takeaways
+    assert (chapter.dir / ".cache" / "sections" / "notes").is_dir()
+    assert not [p for p in chapter.dir.iterdir() if p.name.startswith(("sections", "outline"))]  # nothing loose
+
+
+def test_old_cache_layout_is_moved_and_still_hits(chapter_pdfs, monkeypatch):
+    import backend.pipeline.run as run
+
+    fake = FakeLLM()
+    monkeypatch.setattr(run, "stage_llm", lambda stage, backend=None: fake)
+    chapter = Chapter("Migrate week", chapter_pdfs)
+    run.convert_chapter(chapter, ["learner"], by_topic=True)
+    for name in ("sections", "outline-sections.json"):       # put the caches back where old versions kept them
+        src = chapter.dir / ".cache" / name
+        if src.exists():
+            src.rename(chapter.dir / name)
+    writes_before = len(fake.writer_inputs)
+    run.convert_chapter(chapter, ["learner"], by_topic=True)
+    assert len(fake.writer_inputs) == writes_before          # moved back into .cache/, every section a hit
+    assert not (chapter.dir / "sections").exists() and (chapter.dir / ".cache" / "sections").is_dir()
+
+
+def test_dockey_is_still_accepted_as_donkey():
+    from backend.cli import parse_levels
+
+    assert parse_levels("dockey,learner") == ["donkey", "learner"]

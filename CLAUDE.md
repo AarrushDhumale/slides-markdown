@@ -16,7 +16,7 @@ cd /home/aarrush/personal/projects/slides_to_markdown
 .venv/bin/s2m worker         # web app worker (needs SUPABASE_URL / SUPABASE_SERVICE_KEY in .env)
 cd web && corepack pnpm@9.15.4 dev|build|typecheck|test   # Next.js app (no npm on this machine)
 ```
-- **Levels:** `proficient` (dense revision), `learner` (main doc), `dockey` (ELI5), `summary` (condensed *from the learner doc*), `all`.
+- **Levels:** `proficient` (dense revision), `learner` (main doc), `donkey` (ELI5), `notes` (short lecture notes with key diagrams, condensed *from the learner doc*), `summary` (cram sheet, condensed *from the learner doc*), `all`. `dockey` is still accepted as an alias for `donkey`.
 - **Layout flags:**
   - default is **chapter-wise**, written to `<level>.md`;
   - `--by-topic` → `<level>-by-topic.md`;
@@ -54,9 +54,11 @@ cd web && corepack pnpm@9.15.4 dev|build|typecheck|test   # Next.js app (no npm 
    2. `missing_slides` coverage check → one retry listing the skipped slides;
    3. overshoot more than 1.35× the word budget → one `tighten` pass.
 6. **`assemble.py`** normalises Markdown (math, fences, details, slide-ref stripping, alt text), guarantees headings, inserts missing essential figures, turns repeat images into links and builds the contents list. Chapter mode lists chapters only, strips quizzes from non-final parts, and drops the duplicate heading on single-part chapters.
-7. **`summarize.py`** condenses each learner section (`prompts/summary.md`) and adds chapter takeaways.
+7. **`summarize.py`** condenses each learner section into the `summary` (`prompts/summary.md`, plus chapter takeaways) or the `notes` (`prompts/notes.md`, keeps up to 3 diagrams) level.
 
-Caches of generated prose are keyed by the full prompt, the input and `llm.generation_id` (model plus sampling options). Prompt edits therefore invalidate them automatically. They live in `sections*/`, `outline-*.json`, `overlap-*.json` and `chapters.json`.
+Caches of generated prose are keyed by the full prompt, the input and `llm.generation_id` (model plus sampling options). Prompt edits therefore invalidate them automatically. They live in `data/chapters/<slug>/.cache/` (`sections*/`, `outline-*.json`, `overlap-*.json`, `chapters.json`, `papers-map-*.json`) via `chapter.cache_root()`; `Chapter.ingest()` moves caches left in the old layout there (`migrate_cache`).
+
+8. **`papers.py`** (optional, when `Chapter.papers` is set: `--papers`, or `data/inbox/<chapter>/papers/*.pdf`) reads past-year papers with the vision reader (cached per page under the PDF's cache dir), joins questions split across pages, pairs solution PDFs by filename, maps each question to outline sections with one cached text call per paper, and writes `papers.json` + `papers.md`. `assemble(..., exam_tags, stars)` adds the "Asked in" line and ★ at assembly time only, so prose caches are unaffected. No model writes solutions. Web app integration is not built yet.
 
 ## Web app (`web/`, `backend/worker.py`, `supabase/migrations/001_init.sql`)
 - **Shape:** Vercel (Next.js 15, Tailwind v4) ↔ Supabase (Postgres + Storage + Realtime) ↔ `s2m worker` (laptop now,
@@ -70,7 +72,7 @@ Caches of generated prose are keyed by the full prompt, the input and `llm.gener
   12), and `outline.fallback_outline` (consecutive slides grouped, never across PDFs) if the outline call fails. This
   supersedes "don't fragment into many small sections" **for the web app only**; the CLI default is still chapter-wise.
 - **Layout the user asked for:** two panes (sources + Studio action cards left, reader right); Summary is the default view;
-  Learner / Revision (proficient) / Explain simply (dockey) / Quiz are buttons. Quiz = `quiz.json` parsed from the learner
+  Learner / Revision (proficient) / Explain simply (donkey) / Quiz are buttons. Quiz = `quiz.json` parsed from the learner
   doc (`backend/pipeline/quiz.py`), no model call. Slide chips (from `<!-- slides … -->` anchors) open a popover.
 - **Explain this:** highlight text or click a figure/slide → `/api/explain` → cache hit, or an `explain_requests` row the
   worker answers with the local model (streams `partial_text`), or a direct Gemini stream when the worker is offline/busy.
@@ -120,7 +122,7 @@ Caches of generated prose are keyed by the full prompt, the input and `llm.gener
 
 ## User preferences (learned the hard way)
 - **Chapter-wise layout.** Chapters are auto-detected, and the main doc must **not** be fragmented into many small sections. A single-topic upload stays whole. "n slides → n sections" meant decks, not pages.
-- **Shorter Learner docs.** The current budgets are `LENGTH_FACTOR = {"proficient": 0.6, "learner": 1.1, "dockey": 1.3}` with a 900-word cap and the tighten pass. They said "keep the shortened length".
+- **Shorter Learner docs.** The current budgets are `LENGTH_FACTOR = {"proficient": 0.6, "learner": 1.1, "donkey": 1.3}` with a 900-word cap and the tighten pass. They said "keep the shortened length".
 - **No hallucinated extras.** Material not on the slides goes in `> **Beyond the slides:**`. Don't decode raw dumps (DWARF, hex) beyond what the slides annotate.
 - **Feedback is blunt and terse.** When a request is ambiguous ("revert", "fix issues"), ask a targeted question or reproduce the problem before changing code.
 

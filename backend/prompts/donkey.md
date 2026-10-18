@@ -1,4 +1,4 @@
-## Level: Dockey (explain like I'm five)
+## Level: Donkey (explain like I'm five)
 
 Reader: a complete beginner who finds the subject intimidating. Assume no background at all.
 

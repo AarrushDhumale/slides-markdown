@@ -15,9 +15,10 @@ from backend.pipeline.outline import MODE_SUFFIX, build_outline
 from backend.pipeline.chapterize import detect_chapters
 from backend.pipeline.per_deck import build_per_chapter_outline, build_per_deck_outline
 from backend.pipeline.per_slide import build_per_slide_outline
-from backend.pipeline.summarize import summarize
+from backend.pipeline.summarize import notes as make_notes, summarize
 from backend.pipeline.write import write_all
 
+CONDENSED = {"summary", "notes"}  # levels made from the learner doc, not from the slides
 Progress = Callable[[str, int, int], None]  # (stage, done, total)
 
 # Topic layout: about one section per 5 teaching slides with no 12-section ceiling (a book, not a chapter)
@@ -77,22 +78,35 @@ def convert_chapter(chapter: Chapter, levels: list[str], backend: str | None = N
     if progress:
         progress("outline", len(outline.sections), len(outline.sections))
 
+    exam_tags, stars, analysis = {}, set(), None
+    if chapter.papers:  # past papers: read, mapped to the outline's topics; tags are added at assembly only
+        from backend.pipeline.papers import analyse_papers
+        analysis = analyse_papers(chapter, chapter.papers, outline, extracts, extract_llm, outline_llm,
+                                  "learner" + MODE_SUFFIX[outline.mode] + ".md", report("papers"))
+        if analysis:
+            exam_tags, stars = analysis.tags, analysis.stars
+
     write_llm = stage_llm("write", backend)
-    outputs = {}
+    outputs = {"papers": chapter.dir / "papers.md"} if analysis else {}
     written: dict[str, list[str]] = {}
-    # the summary is condensed from the learner doc, so learner sections are needed (cached if present)
-    to_write = [lv for lv in levels if lv != "summary"]
-    if "summary" in levels and "learner" not in to_write:
+    # the summary and notes are condensed from the learner doc, so learner sections are needed (cached if present)
+    to_write = [lv for lv in levels if lv not in CONDENSED]
+    if CONDENSED & set(levels) and "learner" not in to_write:
         to_write.append("learner")
     for level in to_write:
         written[level] = write_all(outline, level, extracts, slides, write_llm, chapter,
                                    report(f"write:{level}"), review=review)
         if level in levels:
-            outputs[level] = assemble(chapter, outline, written[level], level, slides, extracts)
+            outputs[level] = assemble(chapter, outline, written[level], level, slides, extracts,
+                                   exam_tags=exam_tags, stars=stars)
             chapter.mark_generated(level + MODE_SUFFIX[outline.mode])
+    if "notes" in levels:
+        sections = make_notes(outline, written["learner"], write_llm, chapter, report("notes"))
+        outputs["notes"] = assemble(chapter, outline, sections, "notes", slides, extracts, exam_tags=exam_tags, stars=stars)
+        chapter.mark_generated("notes" + MODE_SUFFIX[outline.mode])
     if "summary" in levels:
         sections, takeaways = summarize(outline, written["learner"], write_llm, chapter, report("summary"))
-        outputs["summary"] = assemble(chapter, outline, sections, "summary", slides, None, takeaways)
+        outputs["summary"] = assemble(chapter, outline, sections, "summary", slides, None, takeaways, exam_tags, stars)
         chapter.mark_generated("summary" + MODE_SUFFIX[outline.mode])
     if progress:
         progress("done", int(time.time() - t0), 0)
