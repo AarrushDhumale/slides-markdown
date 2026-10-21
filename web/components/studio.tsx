@@ -72,7 +72,7 @@ export function Studio({
             )}
           >
             <div className="flex w-full items-center justify-between">
-              <span className={cn("grid size-7 place-items-center rounded-lg", selected ? "bg-accent text-white dark:text-[#0e0e10]" : "bg-surface-2 text-muted group-hover:text-accent")}>
+              <span className={cn("grid size-7 place-items-center rounded-lg", selected ? "bg-accent text-white dark:text-[#111]" : "bg-surface-2 text-muted group-hover:text-accent")}>
                 <Icon className="size-4" />
               </span>
               {generating && <Loader2 className="size-3.5 animate-spin text-accent" />}

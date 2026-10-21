@@ -46,6 +46,10 @@ export function useSignedUrls(notebookId: string) {
       const todo = paths.filter((p) => !pending.current.has(p));
       if (!todo.length) return;
       todo.forEach((p) => pending.current.add(p));
+      if (notebookId === "demo") {
+        setUrls((u) => ({ ...u, ...Object.fromEntries(todo.map((p) => [p, `/demo/${p}`])) }));
+        return;
+      }
       const { data } = await supabase().storage.from("outputs").createSignedUrls(todo.map((p) => `${notebookId}/${p}`), 3600);
       const next: Record<string, string> = {};
       data?.forEach((d, i) => d.signedUrl && (next[todo[i]] = d.signedUrl));
@@ -90,7 +94,10 @@ export function Reader({
 
   // Mounted only after the notes were fetched in the browser, so reading localStorage here is safe.
   const [mode, setMode] = useState<Mode>(() => stored(`mode:${notebookId}`, "book", (r) => (r === "scroll" ? "scroll" : "book")));
-  const [page, setPage] = useState<number>(() => stored(`page:${notebookId}`, 0, (r) => Math.min(Math.max(0, Number(r) || 0), total)));
+  const [page, setPage] = useState<number>(() => {
+    const q = Number(new URLSearchParams(location.search).get("p")); // ?p=3 opens topic 3 (handy for links and screenshots)
+    return q > 0 ? Math.min(q, total) : stored(`page:${notebookId}`, 0, (r) => Math.min(Math.max(0, Number(r) || 0), total));
+  });
   const [read, setRead] = useState<Set<number>>(() => stored(`read:${notebookId}`, new Set<number>(), (r) => new Set<number>(JSON.parse(r))));
   const [dir, setDir] = useState<"next" | "prev">("next");
   const [printing, setPrinting] = useState(false);
@@ -226,7 +233,7 @@ export function Reader({
 
   return (
     <div ref={container} className="relative">
-      <div className="no-print sticky top-14 z-20 -mx-4 mb-6 flex items-center gap-2 border-b border-border bg-bg/85 px-4 py-2.5 backdrop-blur sm:-mx-8 sm:px-8">
+      <div className="no-print sticky top-14 z-20 -mx-4 mb-8 flex items-center gap-2 border-b border-border bg-bg/90 px-4 py-2 backdrop-blur sm:-mx-6 sm:px-6">
         <span className="text-[13px] font-semibold whitespace-nowrap">{levelName}</span>
         <span className="truncate text-[12.5px] text-faint max-sm:hidden">
           {hasPages && !showAll ? (page === 0 ? "· Cover" : `· Topic ${page} of ${total}`) : `· ${book.minutes} min read`}
@@ -296,13 +303,25 @@ export function Reader({
         </div>
         {hasPages && !showAll && (
           <div className="absolute inset-x-0 bottom-[-1px] h-0.5 bg-transparent" aria-hidden>
-            <div className="h-full bg-accent transition-all duration-300" style={{ width: `${progress * 100}%` }} />
+            <div className="h-full bg-accent/70" style={{ width: `${progress * 100}%` }} />
           </div>
         )}
       </div>
 
+      <div className="grid w-full gap-x-8 lg:grid-cols-[220px_minmax(0,1fr)] xl:grid-cols-[220px_minmax(0,1fr)_200px]">
+        <DocsNav
+          book={book}
+          current={showAll ? -1 : page}
+          read={read}
+          onOpen={(n) => {
+            if (mode === "book") go(n);
+            else if (n === 0) window.scrollTo({ top: 0, behavior: "smooth" });
+            else document.getElementById(`topic-${n}`)?.scrollIntoView({ behavior: "smooth" });
+          }}
+        />
+        <div className="mx-auto w-full min-w-0 max-w-[44rem]">
       {showAll ? (
-        <article className="mx-auto max-w-[44rem] pb-32">
+        <article className="max-w-[44rem] pb-32">
           <Markdown images={plainImages}>{[`# ${book.title}`, book.intro].filter(Boolean).join("\n\n")}</Markdown>
           {book.pages.map((p) => (
             <section key={p.index} id={`topic-${p.number}`} data-section={p.index} className={cn("scroll-mt-28", p.number > 1 && "print:break-before-page")}>
@@ -326,6 +345,9 @@ export function Reader({
           onGo={go}
         />
       )}
+        </div>
+        {!showAll && page > 0 ? <OnThisPage root={container} depKey={page} /> : <div className="max-xl:hidden" />}
+      </div>
 
       {pick && !target && (
         <button
@@ -388,12 +410,11 @@ function Cover({
   const firstUnread = book.pages.find((p) => !read.has(p.number))?.number ?? 1;
   const started = read.size > 0;
   return (
-    <div className={cn("mx-auto max-w-[46rem] pb-24", dir === "next" ? "turn-next" : "turn-prev")}>
-      <div className="overflow-hidden rounded-3xl border border-border bg-surface shadow-card max-sm:rounded-2xl">
-        <div className="h-1.5 bg-gradient-to-r from-accent via-accent/60 to-accent/10" />
-        <div className="px-6 py-9 sm:px-12 sm:py-12">
-          <p className="text-[11.5px] font-semibold tracking-[0.14em] text-accent-text uppercase">{levelName} · Study book</p>
-          <h1 className="mt-3 font-sans text-[2.15rem] leading-[1.1] font-semibold tracking-[-0.03em] text-balance sm:text-[2.6rem]">{book.title}</h1>
+    <div className="max-w-[44rem] pb-24">
+      <div>
+        <div className="pb-4">
+          <p className="eyebrow">{levelName}</p>
+          <h1 className="mt-3 font-sans text-[2.1rem] leading-[1.12] font-semibold tracking-[-0.03em] text-balance sm:text-[2.5rem]">{book.title}</h1>
           <p className="mt-4 text-[13.5px] text-muted">{meta.join(" · ")}</p>
           {book.decks.length > 0 && (
             <p className="mt-1 line-clamp-2 text-[12.5px] text-faint">From {book.decks.join(" · ")}</p>
@@ -405,11 +426,11 @@ function Cover({
         </div>
       </div>
 
-      <h2 className="mt-10 mb-3 text-[11.5px] font-semibold tracking-[0.14em] text-faint uppercase">Contents</h2>
-      <ol className="overflow-hidden rounded-2xl border border-border bg-surface shadow-card">
+      <h2 className="eyebrow mt-12 mb-3">Contents</h2>
+      <ol className="overflow-hidden rounded-xl border border-border">
         {book.pages.map((p) => (
           <li key={p.index} className="border-b border-border last:border-0">
-            <button onClick={() => onOpen(p.number)} className="group flex w-full items-center gap-3.5 px-4 py-3.5 text-left transition-colors hover:bg-surface-2 sm:px-5">
+            <button onClick={() => onOpen(p.number)} className="group flex w-full items-center gap-3.5 px-4 py-3 text-left transition-colors hover:bg-surface sm:px-5">
               <span className={cn("grid size-7 shrink-0 place-items-center rounded-lg text-[12px] font-semibold tabular-nums", read.has(p.number) ? "bg-success-soft text-success" : "bg-surface-2 text-muted group-hover:bg-accent-soft group-hover:text-accent-text")}>
                 {read.has(p.number) ? <Check className="size-3.5" /> : p.number}
               </span>
@@ -448,41 +469,37 @@ function TopicPage({
   onGo: (n: number) => void;
 }) {
   return (
-    <div className={cn("book-page mx-auto max-w-[46rem] pb-24", dir === "next" ? "turn-next" : "turn-prev")}>
-      <article
-        data-section={page.index}
-        className="rounded-3xl border border-border bg-surface px-6 py-8 shadow-card sm:px-12 sm:py-12 max-sm:rounded-none max-sm:border-0 max-sm:bg-transparent max-sm:px-0 max-sm:py-2 max-sm:shadow-none"
-      >
+    <div className="book-page max-w-[44rem] pb-24">
+      <article data-section={page.index}>
         <div className="flex items-center justify-between gap-3">
-          <p className="text-[11.5px] font-semibold tracking-[0.14em] text-accent-text uppercase">
-            Topic {page.number} <span className="text-faint">of {total}</span>
+          <p className="eyebrow">
+            Topic {page.number} <span className="opacity-70">of {total}</span> · {page.minutes} min read
           </p>
           <div className="no-print">{chip}</div>
         </div>
-        <h1 className="mt-3 font-sans text-[1.85rem] leading-[1.15] font-semibold tracking-[-0.025em] text-balance sm:text-[2.2rem]">{page.title}</h1>
-        <p className="mt-2 text-[12.5px] text-faint">{page.minutes} min read</p>
-        <hr className="my-7 border-border" />
+        <h1 className="mt-3 font-sans text-[1.9rem] leading-[1.15] font-semibold tracking-[-0.03em] text-balance sm:text-[2.25rem]">{page.title}</h1>
+        <div className="my-8" />
         <Markdown images={images}>{page.body}</Markdown>
       </article>
 
-      <nav className="no-print mt-5 grid grid-cols-2 gap-3" aria-label="Page navigation">
+      <nav className="no-print mt-16 grid grid-cols-2 gap-3 border-t border-border pt-8" aria-label="Page navigation">
         <button
           onClick={() => onGo(prev ? prev.number : 0)}
-          className="group flex flex-col items-start rounded-2xl border border-border bg-surface px-4 py-3.5 text-left shadow-card transition-all hover:-translate-y-px hover:border-border-strong"
+          className="group flex flex-col items-start rounded-lg border border-border px-4 py-3.5 text-left transition-colors hover:border-accent/60"
         >
           <span className="flex items-center gap-1.5 text-[11.5px] font-medium text-faint">
-            <ArrowLeft className="size-3.5 transition-transform group-hover:-translate-x-0.5" /> {prev ? "Previous" : "Cover"}
+            <ArrowLeft className="size-3.5 transition-transform group-hover:-translate-x-0.5" /> {prev ? "Previous topic" : "Overview"}
           </span>
-          <span className="mt-1 line-clamp-2 text-[14px] font-medium tracking-tight">{prev ? prev.title : "Back to contents"}</span>
+          <span className="mt-1 line-clamp-2 text-[14.5px] font-medium tracking-tight text-accent-text">{prev ? prev.title : "Back to contents"}</span>
         </button>
         <button
           onClick={() => onGo(next ? next.number : 0)}
-          className="group flex flex-col items-end rounded-2xl border border-border bg-surface px-4 py-3.5 text-right shadow-card transition-all hover:-translate-y-px hover:border-border-strong"
+          className="group flex flex-col items-end rounded-lg border border-border px-4 py-3.5 text-right transition-colors hover:border-accent/60"
         >
           <span className="flex items-center gap-1.5 text-[11.5px] font-medium text-faint">
-            {next ? "Next" : "Finished"} <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />
+            {next ? "Next topic" : "Finished"} <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />
           </span>
-          <span className="mt-1 line-clamp-2 text-[14px] font-medium tracking-tight">{next ? next.title : "Back to contents"}</span>
+          <span className="mt-1 line-clamp-2 text-[14.5px] font-medium tracking-tight text-accent-text">{next ? next.title : "Back to contents"}</span>
         </button>
       </nav>
       <p className="no-print mt-4 text-center text-[12px] text-faint max-sm:hidden">Use ← → to turn pages</p>
@@ -556,5 +573,87 @@ function SlidesChip({
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
+  );
+}
+
+function DocsNav({ book, current, read, onOpen }: { book: ReturnType<typeof parseBook>; current: number; read: Set<number>; onOpen: (n: number) => void }) {
+  const [open, setOpen] = useState(true);
+  if (!book.pages.length) return <div className="max-lg:hidden" />;
+  const item = (active: boolean) =>
+    cn(
+      "flex w-full items-start gap-2 rounded-md px-2.5 py-1.5 text-left text-[13.5px] leading-snug transition-colors",
+      active ? "bg-surface-3 font-medium text-text" : "text-muted hover:bg-surface-2 hover:text-text",
+    );
+  return (
+    <nav aria-label="Topics" className="no-print sticky top-[112px] max-h-[calc(100dvh-128px)] self-start overflow-y-auto pb-8 max-lg:hidden">
+      <button onClick={() => onOpen(0)} className={item(current === 0)}>
+        <BookOpen className="mt-0.5 size-3.5 shrink-0" /> Overview
+      </button>
+      <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="eyebrow mt-4 mb-1 flex w-full items-center gap-1 px-2.5 hover:text-muted">
+        <ChevronRight className={cn("size-3 transition-transform", open && "rotate-90")} /> Topics
+      </button>
+      {open && (
+        <ol className="ml-[17px] space-y-px border-l border-border pl-1.5">
+          {book.pages.map((p) => (
+            <li key={p.index}>
+              <button onClick={() => onOpen(p.number)} className={item(current === p.number)} aria-current={current === p.number ? "page" : undefined}>
+                <span className="line-clamp-2 flex-1">{p.title}</span>
+                {read.has(p.number) && <Check className="mt-0.5 size-3 shrink-0 text-success" />}
+              </button>
+            </li>
+          ))}
+        </ol>
+      )}
+    </nav>
+  );
+}
+
+/** "On this page": the open topic's headings, read from the rendered DOM, with scroll-spy. */
+function OnThisPage({ root, depKey }: { root: React.RefObject<HTMLDivElement | null>; depKey: number }) {
+  const [heads, setHeads] = useState<{ id: string; text: string; level: number }[]>([]);
+  const [active, setActive] = useState("");
+  useEffect(() => {
+    const el = root.current;
+    if (!el) return;
+    const hs = [...el.querySelectorAll<HTMLElement>(".notes h2[id], .notes h3[id]")];
+    setHeads(
+      hs.map((h) => {
+        const c = h.cloneNode(true) as HTMLElement;
+        c.querySelectorAll(".katex-mathml").forEach((n) => n.remove());
+        return { id: h.id, text: c.textContent?.trim() ?? "", level: h.tagName === "H2" ? 2 : 3 };
+      }),
+    );
+    setActive(hs[0]?.id ?? "");
+    const io = new IntersectionObserver(
+      (es) => {
+        const v = es.filter((e) => e.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+        if (v) setActive(v.target.id);
+      },
+      { rootMargin: "-100px 0px -70% 0px" },
+    );
+    hs.forEach((h) => io.observe(h));
+    return () => io.disconnect();
+  }, [root, depKey]);
+  if (heads.length < 2) return <div className="max-xl:hidden" />;
+  return (
+    <nav aria-label="On this page" className="no-print sticky top-[112px] max-h-[calc(100dvh-128px)] self-start overflow-y-auto pb-8 max-xl:hidden">
+      <p className="eyebrow mb-2">On this page</p>
+      <ul className="border-l border-border">
+        {heads.map((h) => (
+          <li key={h.id}>
+            <button
+              onClick={() => document.getElementById(h.id)?.scrollIntoView({ behavior: "smooth" })}
+              className={cn(
+                "-ml-px block w-full border-l py-1 text-left text-[12.5px] leading-snug transition-colors",
+                h.level === 3 ? "pl-6" : "pl-3",
+                active === h.id ? "border-accent text-text" : "border-transparent text-muted hover:text-text",
+              )}
+            >
+              {h.text}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </nav>
   );
 }

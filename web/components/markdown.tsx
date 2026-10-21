@@ -1,7 +1,7 @@
 "use client";
 
-import { Maximize2, Sparkles } from "lucide-react";
-import { memo } from "react";
+import { Check, Copy, Maximize2, Sparkles } from "lucide-react";
+import { Children, isValidElement, memo, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
@@ -11,6 +11,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 
 import { cn } from "@/lib/cn";
+import { remarkCodeTabs, tabLabel } from "@/lib/remark-codetabs";
 import { anchor } from "@/lib/slide-anchors";
 
 // Generated notes come from a model reading user-uploaded PDFs: allow the HTML the pipeline emits
@@ -23,6 +24,7 @@ const schema = {
     ...defaultSchema.attributes,
     code: [["className", /^language-./, "math-inline", "math-display"]],
     details: ["open"],
+    div: [...(defaultSchema.attributes?.div ?? []), "dataCodetabs"],
   },
 };
 
@@ -35,6 +37,69 @@ function textOf(node: React.ReactNode): string {
   return "";
 }
 
+function CopyButton({ text }: { text: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button
+      type="button"
+      aria-label="Copy code"
+      onClick={() => {
+        navigator.clipboard?.writeText(text).then(() => {
+          setDone(true);
+          setTimeout(() => setDone(false), 1500);
+        });
+      }}
+      className="no-print ml-auto grid size-7 place-items-center rounded-md text-faint transition-colors hover:bg-surface-3 hover:text-text"
+    >
+      {done ? <Check className="size-3.5 text-accent" /> : <Copy className="size-3.5" />}
+    </button>
+  );
+}
+
+type PreProps = { children?: React.ReactNode; node?: { children?: unknown[] } };
+
+/** Language, tab label and plain text of a rendered <pre><code>. */
+function codeInfo({ children, node }: PreProps) {
+  const code = Children.toArray(children).find(isValidElement) as React.ReactElement<{ className?: string; children?: React.ReactNode }> | undefined;
+  const lang = /language-([\w+#-]+)/.exec(code?.props.className ?? "")?.[1] ?? "";
+  const meta = (node?.children?.[0] as { data?: { meta?: string } } | undefined)?.data?.meta ?? null;
+  return { code, lang, label: tabLabel(meta), text: textOf(code?.props.children).replace(/\n$/, "") };
+}
+
+/** One fenced block: a thin bar (language + copy) over the highlighted code. */
+function CodeBlock(props: PreProps) {
+  const { code, lang, text } = codeInfo(props);
+  return (
+    <div className="codeblock">
+      <div className="codeblock-bar">
+        <span>{lang || "text"}</span>
+        <CopyButton text={text} />
+      </div>
+      <pre>{code}</pre>
+    </div>
+  );
+}
+
+/** Adjacent blocks with tab="…" in the fence: one frame, switchable tabs. */
+function CodeTabs({ blocks }: { blocks: React.ReactElement<PreProps>[] }) {
+  const [i, setI] = useState(0);
+  const infos = blocks.map((b) => codeInfo(b.props));
+  const cur = infos[Math.min(i, infos.length - 1)];
+  return (
+    <div className="codeblock">
+      <div className="codeblock-bar" role="tablist">
+        {infos.map((b, n) => (
+          <button key={n} role="tab" aria-selected={n === i} className="codeblock-tab" onClick={() => setI(n)}>
+            {b.label ?? (b.lang || "text")}
+          </button>
+        ))}
+        <CopyButton text={cur.text} />
+      </div>
+      <pre>{cur.code}</pre>
+    </div>
+  );
+}
+
 export type ImageHandlers = {
   resolve: (src: string) => string | undefined;
   onExplain?: (src: string) => void;
@@ -43,6 +108,12 @@ export type ImageHandlers = {
 
 function makeComponents(images?: ImageHandlers): Components {
   return {
+    pre: ({ children, node }) => <CodeBlock node={node}>{children}</CodeBlock>,
+    div: ({ children, ...props }) => {
+      if ((props as Record<string, unknown>)["data-codetabs"] === undefined) return <div {...props}>{children}</div>;
+      const blocks = Children.toArray(children).filter(isValidElement) as React.ReactElement<PreProps>[];
+      return <CodeTabs blocks={blocks} />;
+    },
     h2: ({ children }) => <h2 id={anchor(textOf(children))}>{children}</h2>,
     h3: ({ children }) => <h3 id={anchor(textOf(children))}>{children}</h3>,
     a: ({ href, children }) =>
@@ -117,7 +188,7 @@ export const Markdown = memo(function Markdown({
   return (
     <div className={cn("notes", compact && "notes-compact", className)}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath]}
+        remarkPlugins={[remarkGfm, remarkMath, remarkCodeTabs]}
         rehypePlugins={[rehypeRaw, [rehypeSanitize, schema], rehypeKatex, [rehypeHighlight, { detect: false }]]}
         components={makeComponents(images)}
       >

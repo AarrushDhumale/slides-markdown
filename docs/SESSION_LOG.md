@@ -6,9 +6,9 @@ A handoff for starting a fresh session without re-deriving any of this. Read in 
 
 | | |
 |---|---|
-| Branch | `web-app` (not merged, not pushed). `main` is still the original commit `f441a43`. |
+| Branch | **Session 3 (Oct 19-20): `main` now equals `web-app`** (merged and pushed). Work continues on branch **`frontend-redesign`** (created from `main`, not pushed). See section 11. |
 | Commits on `web-app` | `5e55c5d` web app + hosted-API model layer + "Explain this" · `f7c1242` project guide · `288e193` topic book, book reader, measured model comparison |
-| Uncommitted | Everything from session 2 (section 10 below): Notes level, dockey→donkey, `.cache/` layout, past papers, bake-off images, migration 002, plus the `.env.example` typo fix. `.vscode/` is the editor's folder, never committed. Commit only when asked. |
+| Uncommitted | **Session 3's frontend redesign** (section 11). Session 2's work below was committed as `a8ad2ca`. Older note: everything from session 2 (section 10 below): Notes level, dockey→donkey, `.cache/` layout, past papers, bake-off images, migration 002, plus the `.env.example` typo fix. `.vscode/` is the editor's folder, never committed. Commit only when asked. |
 | Running | Nothing. Local Supabase (Docker), dev server and worker are all stopped. |
 | Tests | `.venv/bin/pytest -q`: **84 pass** · `cd web && corepack pnpm@9.15.4 test`: **10 pass** · typecheck and `next build` pass |
 | Secrets | `OPENROUTER_API_KEY` is in `.env` (gitignored, mode 600). It was once pasted into the tracked `.env.example`, was moved, and was never committed. Spend so far: about **$0.17 of the key's $10 cap**, but the OpenRouter account has **$0 purchased credits** (free tier), so bursts of requests fail with 402 `in_flight_budget_exhausted` (see section 10). No Gemini key exists. Keys never go in `.env.example`. |
@@ -121,3 +121,34 @@ The user wants to work on the frontend (`web/`) next. Read `CLAUDE.md` "Web app"
 4. **Apply migration 002** before testing Notes/Donkey in the web app (local Supabase: `supabase start`, then `supabase db reset` or apply the file).
 5. **The reader** (`web/components/reader.tsx`, `web/lib/book.ts`) shows Markdown as a book; the Notes docs keep up to 3 diagrams per section, so check how they look in the page view. Slide chips, the Explain popover and quiz extraction (`backend/pipeline/quiz.py` parses the learner doc) are unchanged.
 6. Web checks: `cd web && corepack pnpm@9.15.4 typecheck && corepack pnpm@9.15.4 test && corepack pnpm@9.15.4 build` all passed at the end of this session. A live browser check of the new Notes card has **not** been done.
+
+## 11. Session 3 (Oct 19-20, 2026): merge to main, then the frontend redesign
+
+**Git.** Tests first (pytest 84, web typecheck + tests pass). `git merge --ff-only web-app` worked locally, but GitHub's `origin/main` already had PR #1 merged (`7e4ab59`, only up to `ecbfb06`), so the push was rejected. Fix: `git merge origin/main` into local `main` (no conflicts, tree identical to `web-app`), pushed as `c42b725`. Then `git switch -c frontend-redesign`. **Nothing from the redesign is committed yet** (files: `web/app/{globals.css,layout.tsx}`, `web/components/{home-view,logo,markdown,notebook-view,reader,studio,theme-toggle}.tsx`, `web/components/ui/button.tsx`, new `web/lib/remark-codetabs.ts`, new `web/public/demo/`).
+
+**What the user wants.** A simple, calm, dark UI for long reading without fatigue, in the style of Vercel / Stripe / Clerk docs (spec they gave: bg `#121212`, text `#e0e0e0`, muted `#94a3b8`, borders `#27272a`, accent `#38bdf8`, Inter or a screen serif, JetBrains Mono for code, line height ~1.6-1.7, prose 65-75ch, left chapter nav, callouts, images, tabbed code with copy buttons, Previous/Next footer cards). They first showed Spade/LocalCan screenshots (dark, mono eyebrow labels, hairlines); the docs direction replaced that. They also said the bright green was too bright and wanted Notion-calm colours.
+
+**Decisions.** Stayed on Next 15 + Tailwind v4 + Radix + react-markdown. Did **not** adopt Fumadocs/Nextra/MDX: our notes are runtime Markdown from Supabase, not build-time files. Flat style: no shadows, gradients or page-turn animations (`turn-next/prev` removed).
+
+**What exists now (`frontend-redesign`).**
+- **Themes** (`data-theme` on `<html>`, set before paint by the script in `layout.tsx`; `?theme=` URL param and `localStorage.palette`): `docs` (default dark) and `paper` (light). Tokens in `globals.css` (`html[data-theme=...]`). Old green accent and the Graphite/Warm night/Dusk palettes were removed.
+- **Reading fonts** (`data-font`, `?font=`, `localStorage.font`): `inter` (default), `atkinson`, `lora`, `literata`, `nunito`. `--reading-font` for body, `--heading-font` for headings (Lora keeps Inter headings). UI chrome stays Inter; code is JetBrains Mono. Picker: palette icon in the header (`components/theme-toggle.tsx`, exports `PALETTES`, `FONTS`). The user has not yet chosen a favourite font (I suggested Literata or Atkinson); delete the unchosen ones once they pick.
+- **Reader layout** (`components/reader.tsx`): full-width three columns: `DocsNav` (Overview + collapsible Topics, read ticks) | content (`max-w-[44rem]`, centred) | `OnThisPage` (h2/h3 read from the rendered DOM, IntersectionObserver scroll-spy; shown at xl). The sources/tools column (`notebook-view.tsx`) is 280px and can be collapsed with the panel icon. The user asked for it to touch the left edge and run to the right edge, so all max-width caps on the shell were removed.
+- **Markdown** (`components/markdown.tsx`): `CodeBlock` (language bar + copy), `CodeTabs`, and `lib/remark-codetabs.ts`. Tabs are **opt-in**: adjacent fences whose meta has `tab="Label"`. The label currently falls back to the language name (the meta is lost after rehype-raw). The generator prompts do not emit `tab=` yet. Callouts are the existing blockquotes (`> **Key takeaways**`, `> **Beyond the slides:**`), tables have horizontal rules only, figures are dimmed slightly.
+- **Demo mode** (no Supabase needed): `/notebooks/demo`, with `?view=summary|learner|quiz|proficient`, `?p=N` (opens topic N; also works on real notebooks), `?theme=`, `?font=`. Data is static in `web/public/demo/` (copy of `data/chapters/toc`: `summary.md`, `learner.md` with an appended "Formatting sample" topic for code/callout/table checks, `quiz.json`, `assets/`). Wired in `notebook-view.tsx` (`DEMO` constants) and `reader.tsx` (`useSignedUrls` maps assets to `/demo/...`).
+- **Landing page:** hero is now a mono eyebrow + large tight heading, no glow/orbit.
+
+**How screenshots were taken.** `cd web && corepack pnpm@9.15.4 dev -p 3111`, then headless Chrome: `google-chrome --headless=new --no-sandbox --disable-gpu --hide-scrollbars --window-size=1440,1000 --virtual-time-budget=9000 --screenshot=<file> "http://localhost:3111/notebooks/demo?view=learner&p=1"`. Write outputs to the scratchpad, not the repo. The dev server may still be running on port 3111 (`ps -eo pid,args | grep "[n]ext"`).
+
+**Known rough edges / open work (frontend).**
+1. Pick the reading font and delete the rest; decide whether Paper (light) stays.
+2. Not yet reviewed after the restyle: quiz, Explain panel/popover, home page, mobile widths, Paper at full size, print.
+3. The Studio cards in the left column still look alike whether ready or "Generate" (suggest a clearer ready state).
+4. The demo "toc" doc is chapter-style (cover shows the first chapter, topics titled "Topic 1"); real web notebooks use the topic layout and have proper titles.
+5. Custom code-tab labels, and a prompt change so notes can emit `tab=` fences.
+6. The Next.js dev "N" badge in screenshots is dev-only.
+7. Longer marketing landing page (LocalCan-style) not started. Commit `frontend-redesign` when the user asks, then merge to `main`.
+8. Re-run `cd web && corepack pnpm@9.15.4 typecheck && corepack pnpm@9.15.4 test` and `.venv/bin/pytest -q` before committing (web tests not re-run after the redesign; typecheck passes).
+
+**Web resources the user asked about** (I cannot browse design sites; the user collects, I build): inspiration (Awwwards, Mobbin, Land-book, Godly, Refero), components (shadcn/ui, Magic UI, Aceternity, Origin UI), colours (Realtime Colors, Radix Colors, Coolors), fonts (Google Fonts, Fontsource), v0.dev for generated code. Most useful from the user: 2-3 screenshots with "what I like about it", exact component names, URLs of text docs, and a screenshot of anything that looks wrong.
+

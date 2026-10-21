@@ -15,12 +15,30 @@ import { api, ensureSession, supabase, uploadPdfs, type Doc, type Job, type Note
 import { cn } from "@/lib/cn";
 
 async function fetchText(path: string): Promise<string> {
+  if (path.startsWith("demo/")) {
+    const res = await fetch(`/${path}`);
+    if (!res.ok) throw new Error("Demo file missing");
+    return res.text();
+  }
   const { data, error } = await supabase().storage.from("outputs").download(path);
   if (error || !data) throw new Error(error?.message ?? "Could not load the notes");
   return data.text();
 }
 
+const DEMO = "demo";
+const demoNow = new Date().toISOString();
+const DEMO_NOTEBOOK: Notebook = { id: DEMO, title: "Theory of Computation (demo)", status: "ready", slide_count: 120, created_at: demoNow, updated_at: demoNow };
+const DEMO_DOCS: Doc[] = [
+  { level: "summary", storage_path: "summary.md", word_count: 2400, updated_at: demoNow },
+  { level: "learner", storage_path: "learner.md", word_count: 9800, updated_at: demoNow },
+  { level: "quiz", storage_path: "quiz.json", word_count: 0, updated_at: demoNow },
+];
+const DEMO_SOURCES: Source[] = ["Non-regular languages.pdf", "FSA minimization.pdf", "Context-free grammars.pdf", "Ambiguity in CFGs.pdf"].map((filename, i) => ({
+  id: `d${i}`, filename, size_bytes: 2_400_000 + i * 310_000, pages: 28 + i * 3, position: i,
+}));
+
 export function NotebookView({ id }: { id: string }) {
+  const demo = id === DEMO;
   const [notebook, setNotebook] = useState<Notebook | null>(null);
   const [missing, setMissing] = useState(false);
   const [sources, setSources] = useState<Source[]>([]);
@@ -31,11 +49,19 @@ export function NotebookView({ id }: { id: string }) {
   const [content, setContent] = useState<Record<string, string>>({}); // `${level}@${updated_at}` -> text
   const [slides, setSlides] = useState<SlideIndex | null>(null);
   const [mobilePane, setMobilePane] = useState<"notes" | "tools">("notes");
+  const [sideOpen, setSideOpen] = useState(true); // desktop: collapse the sources/tools column to give the reader room
   const [uploading, setUploading] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const userPicked = useRef(false);
 
   const load = useCallback(async () => {
+    if (demo) {
+      setNotebook(DEMO_NOTEBOOK);
+      setTitle(DEMO_NOTEBOOK.title);
+      setSources(DEMO_SOURCES);
+      setDocs(DEMO_DOCS);
+      return;
+    }
     await ensureSession();
     const db = supabase();
     const [nb, src, jb, dc, wk] = await Promise.all([
@@ -55,9 +81,13 @@ export function NotebookView({ id }: { id: string }) {
     setJobs((jb.data ?? []) as Job[]);
     setDocs((dc.data ?? []) as Doc[]);
     setWorker(((wk.data ?? [])[0] as WorkerStatus) ?? null);
-  }, [id]);
+  }, [id, demo]);
 
   useEffect(() => {
+    if (demo) {
+      load();
+      return;
+    }
     load().catch((e) => toast.error(e instanceof Error ? e.message : "Could not load this notebook"));
     const db = supabase();
     const channel = db
@@ -73,14 +103,19 @@ export function NotebookView({ id }: { id: string }) {
       db.removeChannel(channel);
       clearInterval(timer);
     };
-  }, [id, load]);
+  }, [id, load, demo]);
 
   // open the first ready view (summary first) unless the user picked one
   useEffect(() => {
     if (userPicked.current) return;
+    if (demo) {
+      const v = new URLSearchParams(location.search).get("view") as View | null;
+      setView(v ?? "summary");
+      return;
+    }
     const first = ACTIONS.find((a) => docs.some((d) => d.level === (a.key === "quiz" ? "quiz" : a.level)));
     if (first) setView(first.key);
-  }, [docs]);
+  }, [docs, demo]);
 
   const level = view === "quiz" ? "quiz" : view;
   const doc = docs.find((d) => d.level === level);
@@ -88,18 +123,18 @@ export function NotebookView({ id }: { id: string }) {
 
   useEffect(() => {
     if (!doc || !docKey || content[docKey] !== undefined) return;
-    fetchText(doc.storage_path)
+    fetchText(demo ? `demo/${doc.storage_path}` : doc.storage_path)
       .then((text) => setContent((c) => ({ ...c, [docKey]: text })))
       .catch((e) => toast.error(e.message));
-  }, [doc, docKey, content]);
+  }, [doc, docKey, content, demo]);
 
   const slidesStamp = docs.find((d) => d.level === "learner")?.updated_at;
   useEffect(() => {
-    if (!slidesStamp) return;
+    if (!slidesStamp || demo) return;
     fetchText(`${id}/slides.json`)
       .then((t) => setSlides(JSON.parse(t)))
       .catch(() => setSlides(null));
-  }, [id, slidesStamp]);
+  }, [id, slidesStamp, demo]);
 
   const generate = async (lvl: string) => {
     try {
@@ -176,8 +211,8 @@ export function NotebookView({ id }: { id: string }) {
         )}
         {notebook && <span className="max-sm:hidden"><StatusBadge status={notebook.status} /></span>}
         <button
-          className="grid size-9 place-items-center rounded-lg text-muted hover:bg-surface-2 lg:hidden"
-          onClick={() => setMobilePane((p) => (p === "notes" ? "tools" : "notes"))}
+          className="grid size-9 place-items-center rounded-lg text-muted hover:bg-surface-2"
+          onClick={() => (window.innerWidth >= 1024 ? setSideOpen((o) => !o) : setMobilePane((p) => (p === "notes" ? "tools" : "notes")))}
           aria-label="Toggle sources and tools"
         >
           <PanelLeft className="size-[18px]" />
@@ -185,10 +220,11 @@ export function NotebookView({ id }: { id: string }) {
         <ThemeToggle />
       </header>
 
-      <div className="mx-auto flex w-full max-w-[1400px] flex-1">
+      <div className="flex w-full flex-1">
         <aside
           className={cn(
-            "no-print w-full shrink-0 border-border bg-bg px-4 py-5 lg:sticky lg:top-14 lg:block lg:h-[calc(100dvh-56px)] lg:w-[320px] lg:overflow-y-auto lg:border-r",
+            "no-print w-full shrink-0 border-border bg-bg px-4 py-5 lg:sticky lg:top-14 lg:h-[calc(100dvh-56px)] lg:w-[280px] lg:overflow-y-auto lg:border-r",
+            sideOpen ? "lg:block" : "lg:hidden",
             mobilePane === "tools" ? "block" : "hidden",
           )}
         >
@@ -219,7 +255,7 @@ export function NotebookView({ id }: { id: string }) {
           </p>
         </aside>
 
-        <main className={cn("min-w-0 flex-1 px-4 sm:px-8", mobilePane === "tools" ? "max-lg:hidden" : "")}>
+        <main className={cn("min-w-0 flex-1 px-4 sm:px-6", mobilePane === "tools" ? "max-lg:hidden" : "")}>
           {!notebook ? (
             <ReaderSkeleton />
           ) : !doc ? (
