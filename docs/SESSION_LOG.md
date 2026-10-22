@@ -152,3 +152,29 @@ The user wants to work on the frontend (`web/`) next. Read `CLAUDE.md` "Web app"
 
 **Web resources the user asked about** (I cannot browse design sites; the user collects, I build): inspiration (Awwwards, Mobbin, Land-book, Godly, Refero), components (shadcn/ui, Magic UI, Aceternity, Origin UI), colours (Realtime Colors, Radix Colors, Coolors), fonts (Google Fonts, Fontsource), v0.dev for generated code. Most useful from the user: 2-3 screenshots with "what I like about it", exact component names, URLs of text docs, and a screenshot of anything that looks wrong.
 
+
+## 12. Session 4 (Oct 21-22, 2026): big-deck test on the NN slides, MiniMax free-model trial
+
+**Git.** The redesign was already committed on `frontend-redesign` (`f18cf3d`); this session's work is committed on top of it and pushed. Not merged to `main` yet. `web/public/demo-nn-*` (generated notes from the Nielsen slides) are gitignored, not committed.
+
+**Trap found (my mistake, not a pipeline bug).** A hand-written script that calls `convert_chapter` does NOT load `.env` (only `s2m`'s CLI does: `backend/cli.py` calls `load_dotenv`). The first NN run therefore silently fell back through every chain to `ollama_local` (about 20 s per slide, $0). Scripts must `load_dotenv(".env")` first. The fallback warning is easy to miss in the log: grep for `switching to`.
+
+**Test harness (scratchpad, not in repo).** `WebChapter(title, pdfs, root=Path("data/web/<name>"))` + `convert_chapter(ch, ["learner","summary"], backend, progress, by_topic=True)` = exactly what the web worker does, with no Supabase. Output lands in `data/web/<name>/chapter/`. Set `usage.set_job("...")` to get per-run spend in `s2m usage`. Never use `pkill -f` in this harness (it kills the shell, exit 144): use `ps -eo pid,args | grep "[r]un_x" | awk '{print $1}' | xargs kill`.
+
+**NN deck (Nielsen Ch1 + Ch2, 123 slides, topic layout, learner + summary).**
+- **API pair** (Qwen3.5 reads, DeepSeek V3.2 writes): 6.5 min, $0.156, 28 topics, learner 11.0k words, summary 2.7k, 46 quizzes, 8 "Beyond the slides". Output in `data/web/nn-api/`.
+- **MiniMax** (`minimax/minimax-m3.1-flash:free`, vision, free, every stage): 35 min, $0, 25 topics, learner 9.4k, summary 2.4k, 39 quizzes, 4 Beyond. Output in `data/web/nn-minimax/`.
+- Reading volume was similar (523 vs 565 bullets, 51 vs 39 figures). MiniMax's prose on the sigmoid topic was more worked-through (real tables, the 0.02 weight flip); the API one more conceptual.
+- **Unverified:** neither was checked against the slide images. "Is MiniMax better?" is open. Proposed test: sample about 8 sections from both runs, check against slide images (wrong numbers, invented claims, skipped slides, readability).
+- **MiniMax needs care:** reasoning is mandatory (the API answers 400 to `reasoning.enabled=false`) and shares `max_tokens` with the answer. With the pipeline's limits, 24 of 25 sections came back empty (`finish=length`). New backend option `reasoning_tokens` (added in `LLM._cap`) adds headroom; `minimax_free` uses 24000, which still hit the cap once (retry worked). The outline call (JSON) always burns about 16k tokens thinking and fails, so the pipeline falls back to `outline.fallback_outline` (consecutive slides). About 5x slower than the API pair.
+- Idea not done: API model for the outline, MiniMax for writing; or add `minimax_free` at the end of `write_chain`.
+
+**Code changes.**
+- `backend/llm/backends.yaml`: backend `minimax_free` (rpm 20, concurrency 3, `reasoning_tokens: 24000`, `free: true`) and profile `minimax_free` (all stages; explain stays `explain_chain`). Use with `--backend minimax_free`.
+- `backend/llm/client.py`: `reasoning_tokens` config added to the token cap.
+- Web preview hook: `web/lib/demo.ts` `demoDir()`; `/notebooks/demo?set=NAME` reads `web/public/demo-NAME/{learner.md,summary.md,assets/}` instead of `public/demo/`. Used in `notebook-view.tsx` and `reader.tsx`. To preview a run: copy `chapter/learner-by-topic.md` to `learner.md`, `summary-by-topic.md` to `summary.md`, and `assets/`. The left panel still shows the Theory of Computation demo sources/cards; there is no quiz in these previews.
+- pytest 84 passed, web typecheck passes (web tests not re-run).
+
+**Local leftovers (safe to delete):** `data/web/nn-test`, `nn-test2`, `nn-api`, `nn-minimax`, `web/public/demo-nn-api`, `web/public/demo-nn-minimax`. The user's own `data/chapters/nn` (old chapter-style, Oct 9) was not touched.
+
+**Open next.** 1) Settle MiniMax vs API with the slide-image check. 2) Decide whether `minimax_free` joins a chain. 3) The topic-title artefacts "(part 1)/(part 2)" in the API run. 4) Frontend list in section 11 still stands (font choice, quiz/Explain/mobile review, Studio card ready state). 5) The Nielsen chapters 3-4 (about 280 pages) were not converted this session.

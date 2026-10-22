@@ -13,9 +13,10 @@ import { ACTIONS, ProgressCard, Sources, Studio, workerOnline, type View } from 
 import { ThemeToggle } from "@/components/theme-toggle";
 import { api, ensureSession, supabase, uploadPdfs, type Doc, type Job, type Notebook, type Source, type WorkerStatus } from "@/lib/client";
 import { cn } from "@/lib/cn";
+import { demoDir } from "@/lib/demo";
 
 async function fetchText(path: string): Promise<string> {
-  if (path.startsWith("demo/")) {
+  if (path.startsWith("demo")) {
     const res = await fetch(`/${path}`);
     if (!res.ok) throw new Error("Demo file missing");
     return res.text();
@@ -56,8 +57,10 @@ export function NotebookView({ id }: { id: string }) {
 
   const load = useCallback(async () => {
     if (demo) {
-      setNotebook(DEMO_NOTEBOOK);
-      setTitle(DEMO_NOTEBOOK.title);
+      const set = new URLSearchParams(location.search).get("set");
+      const nb = set ? { ...DEMO_NOTEBOOK, title: `Neural Networks (${set})` } : DEMO_NOTEBOOK;
+      setNotebook(nb);
+      setTitle(nb.title);
       setSources(DEMO_SOURCES);
       setDocs(DEMO_DOCS);
       return;
@@ -123,7 +126,7 @@ export function NotebookView({ id }: { id: string }) {
 
   useEffect(() => {
     if (!doc || !docKey || content[docKey] !== undefined) return;
-    fetchText(demo ? `demo/${doc.storage_path}` : doc.storage_path)
+    fetchText(demo ? `${demoDir()}/${doc.storage_path}` : doc.storage_path)
       .then((text) => setContent((c) => ({ ...c, [docKey]: text })))
       .catch((e) => toast.error(e.message));
   }, [doc, docKey, content, demo]);

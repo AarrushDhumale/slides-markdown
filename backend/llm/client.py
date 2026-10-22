@@ -249,6 +249,7 @@ class LLM:
     def _cap(self, max_tokens: int) -> int:
         """`max_output` in backends.yaml bounds a runaway generation (a small local model stuck in a loop
         would otherwise grind on to the stage's full budget)."""
+        max_tokens += self.cfg.get("reasoning_tokens", 0)  # models that always think: hidden tokens share the cap
         return min(max_tokens, self.cfg.get("max_output", max_tokens))
 
     def _before_call(self, messages: list[dict]) -> list[dict]:

@@ -20,6 +20,8 @@ profiles:
   api_pair: {extract: extract_chain, outline: write_chain, write: write_chain, explain: explain_chain}
   # $0 while building the UI: Gemini free-tier key for both stages (rate-limited; prompts may be used for training)
   dev_free: {extract: gemini_free_flash, outline: gemini_free_lite, write: gemini_free_lite, explain: explain_chain}
+  # MiniMax M3.1 Flash free tier on OpenRouter (vision, 1M ctx) for every stage; prompts may be logged by the free provider
+  minimax_free: {extract: minimax_free, outline: minimax_free, write: minimax_free, explain: explain_chain}
   local: {extract: ollama_local, outline: ollama_local, write: ollama_local, explain: ollama_local}
   # campus GPU (needs the ssh tunnel to DashBW)
   dashbw_ollama: {extract: dashbw_ministral3, outline: dashbw_qwen3, write: dashbw_qwen3}
@@ -263,6 +265,20 @@ backends:
       reasoning: {enabled: false}
       usage: {include: true}
       provider: {order: [DeepInfra, Parasail], quantizations: [fp8, bf16, fp16], require_parameters: true}
+
+  minimax_free:
+    kind: openai
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    model: minimax/minimax-m3.1-flash:free
+    vision: true
+    free: true
+    reasoning_tokens: 24000            # thinking can't be turned off; it shares max_tokens, so long sections came back empty
+    rpm: 20                            # free tier is rate-limited; keep well under it
+    max_concurrency: 3
+    response_format: json_object
+    extra_body:
+      usage: {include: true}
 
   # ---------- per-stage fallback chains ----------
   # Gemini-first reader (profile `api_pair`)

@@ -2,7 +2,7 @@
 
 Converts college lecture slide PDFs into readable Markdown study notes, using a self-hosted vision LLM. The user is a student. This file records the state of the project, the decisions behind it, and the traps already hit, so a new session can continue without re-learning them. `README.md` has the user-facing usage; keep both in sync when behaviour changes.
 
-**Git:** `main` includes the web app, hosted-model layer and topic book (merged Oct 2026). The docs-style frontend redesign lives on branch `frontend-redesign` (uncommitted until the user asks). Commit only when the user asks.
+**Git:** `main` includes the web app, hosted-model layer and topic book (merged Oct 2026). The docs-style frontend redesign is committed on branch `frontend-redesign` (not merged to `main` yet). Commit only when the user asks.
 
 **Resuming?** Read `docs/SESSION_LOG.md` first: current state, what was measured and decided, what is unverified, and the open work list.
 

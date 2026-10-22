@@ -5,3 +5,5 @@ __pycache__/
 data/
 eval/results/
 .env
+web/public/demo-*/
+!web/public/demo/

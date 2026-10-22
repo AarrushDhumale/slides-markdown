@@ -24,6 +24,7 @@ import { Button } from "@/components/ui/button";
 import { parseBook, type BookPage } from "@/lib/book";
 import { supabase } from "@/lib/client";
 import { cn } from "@/lib/cn";
+import { demoDir } from "@/lib/demo";
 import { assetPaths } from "@/lib/slide-anchors";
 
 export type SlideIndex = Record<string, { image: string; title: string }>;
@@ -47,7 +48,7 @@ export function useSignedUrls(notebookId: string) {
       if (!todo.length) return;
       todo.forEach((p) => pending.current.add(p));
       if (notebookId === "demo") {
-        setUrls((u) => ({ ...u, ...Object.fromEntries(todo.map((p) => [p, `/demo/${p}`])) }));
+        setUrls((u) => ({ ...u, ...Object.fromEntries(todo.map((p) => [p, `/${demoDir()}/${p}`])) }));
         return;
       }
       const { data } = await supabase().storage.from("outputs").createSignedUrls(todo.map((p) => `${notebookId}/${p}`), 3600);
