@@ -1,14 +1,17 @@
 "use client";
 
-import { AlertTriangle, BookOpen, CircleHelp, FileText, ListChecks, Loader2, PencilLine, Plus, Smile, WifiOff, Zap } from "lucide-react";
+import { AlertTriangle, BookOpen, CircleHelp, FileText, ListChecks, Loader2, NotebookPen, PencilLine, Plus, Smile, WifiOff, Zap } from "lucide-react";
 
 import { Dropzone } from "@/components/dropzone";
 import { Button } from "@/components/ui/button";
-import type { Doc, Job, Source, WorkerStatus } from "@/lib/client";
+import type { Job, Source, WorkerStatus } from "@/lib/client";
 import { cn } from "@/lib/cn";
 import { LIMITS } from "@/lib/limits";
 
-export type View = "summary" | "notes" | "learner" | "proficient" | "donkey" | "quiz";
+export type View = "summary" | "notes" | "learner" | "proficient" | "donkey" | "quiz" | "mynotes";
+
+/** How many of the notebook's chapters have each doc level (`quiz` included). */
+export type LevelStatus = Record<string, { ready: number; total: number }>;
 
 export const ACTIONS: { key: View; label: string; hint: string; icon: typeof Zap; level: string }[] = [
   { key: "summary", label: "Summary", hint: "The short version", icon: Zap, level: "summary" },
@@ -17,7 +20,11 @@ export const ACTIONS: { key: View; label: string; hint: string; icon: typeof Zap
   { key: "proficient", label: "Revision sheet", hint: "Dense, for revising", icon: ListChecks, level: "proficient" },
   { key: "donkey", label: "Explain simply", hint: "Like I'm five", icon: Smile, level: "donkey" },
   { key: "quiz", label: "Quiz", hint: "Test yourself", icon: CircleHelp, level: "learner" },
+  { key: "mynotes", label: "My notes", hint: "What you wrote", icon: NotebookPen, level: "" },
 ];
+
+/** The doc level whose chapters a card needs (the quiz comes from the learner doc, but is its own file). */
+export const docLevel = (key: View, level: string) => (key === "quiz" ? "quiz" : level);
 
 const STAGES: Record<string, string> = {
   starting: "Starting up",
@@ -38,15 +45,17 @@ export function workerOnline(w: WorkerStatus | null): boolean {
 }
 
 export function Studio({
-  docs,
+  status,
   jobs,
   view,
+  noteCount,
   onSelect,
   onGenerate,
 }: {
-  docs: Doc[];
+  status: LevelStatus;
   jobs: Job[];
   view: View;
+  noteCount: number;
   onSelect: (v: View) => void;
   onGenerate: (level: string) => void;
 }) {
@@ -54,25 +63,29 @@ export function Studio({
   return (
     <div className="grid grid-cols-2 gap-2">
       {ACTIONS.map(({ key, label, hint, icon: Icon, level }) => {
-        const ready = docs.some((d) => d.level === (key === "quiz" ? "quiz" : level));
-        const generating = !ready && active.some((j) => j.levels.includes(level));
-        const selected = view === key && ready;
+        const mine = key === "mynotes";
+        const st = status[docLevel(key, level)] ?? { ready: 0, total: 0 };
+        const complete = st.total > 0 && st.ready === st.total;
+        const partial = st.ready > 0 && !complete;
+        const viewable = mine || st.ready > 0; // a partly written level can already be read
+        const generating = !mine && !complete && active.some((j) => j.levels.includes(level));
+        const selected = view === key && viewable;
         return (
           <button
             key={key}
-            onClick={() => (ready ? onSelect(key) : !generating && onGenerate(level))}
-            disabled={generating}
+            onClick={() => (viewable ? onSelect(key) : !generating && onGenerate(level))}
+            disabled={generating && !viewable}
             className={cn(
               "group relative flex flex-col items-start gap-2 rounded-xl border p-3 text-left transition-all",
               key === "summary" && "col-span-2",
               selected
                 ? "border-accent bg-accent-soft"
                 : "border-border bg-surface hover:-translate-y-px hover:border-border-strong hover:shadow-card",
-              generating && "cursor-progress",
+              generating && !viewable && "cursor-progress",
             )}
           >
             <div className="flex w-full items-center justify-between">
-              <span className={cn("grid size-7 place-items-center rounded-lg", selected ? "bg-accent text-white dark:text-[#0e0e10]" : "bg-surface-2 text-muted group-hover:text-accent")}>
+              <span className={cn("grid size-7 place-items-center rounded-lg", selected ? "bg-accent text-white dark:text-[#111]" : "bg-surface-2 text-muted group-hover:text-accent")}>
                 <Icon className="size-4" />
               </span>
               {generating && <Loader2 className="size-3.5 animate-spin text-accent" />}
@@ -80,7 +93,17 @@ export function Studio({
             <div>
               <span className="block text-[13.5px] leading-tight font-semibold tracking-tight whitespace-nowrap">{label}</span>
               <span className="mt-0.5 block text-[12px] leading-tight text-muted">
-                {ready ? hint : generating ? "Generating…" : <span className="font-medium text-accent-text">Generate →</span>}
+                {mine ? (
+                  noteCount ? `${noteCount} topic${noteCount === 1 ? "" : "s"}` : hint
+                ) : partial ? (
+                  `${st.ready} of ${st.total} chapters${generating ? " · writing…" : ""}`
+                ) : complete ? (
+                  hint
+                ) : generating ? (
+                  "Generating…"
+                ) : (
+                  <span className="font-medium text-accent-text">Generate →</span>
+                )}
               </span>
             </div>
           </button>
@@ -111,7 +134,8 @@ export function ProgressCard({ jobs, worker, onRetry }: { jobs: Job[]; worker: W
   }
   const online = workerOnline(worker);
   const pct = job.total ? Math.min(100, Math.round((job.done / job.total) * 100)) : 0;
-  const label = job.status === "queued" ? (online ? "Waiting in the queue" : "Queued") : (STAGES[job.stage ?? ""] ?? "Working");
+  const chapters = job.chapters_total > 1 ? `Chapter ${Math.min(job.chapters_done + 1, job.chapters_total)} of ${job.chapters_total} · ` : "";
+  const label = job.status === "queued" ? (online ? "Waiting in the queue" : "Queued") : chapters + (STAGES[job.stage ?? ""] ?? "Working");
   return (
     <div className="rounded-xl border border-border bg-surface p-3.5 shadow-card">
       <div className="flex items-center justify-between gap-2">

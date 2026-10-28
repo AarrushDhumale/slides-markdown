@@ -78,3 +78,52 @@ test("helpers", () => {
   assert.deepEqual(splitTitle("## **Bold** title\n\nBody", "x"), { title: "Bold title", body: "Body" });
   assert.deepEqual(splitTitle("No heading here", "Topic 3"), { title: "Topic 3", body: "No heading here" });
 });
+
+import { clampPage, pageNumber, parseLibraryBook } from "./book.ts";
+
+const TWO = `# Paging
+
+<!-- slides A·1 -->
+## Basics
+
+Pages map to frames.
+
+---
+
+<!-- slides A·2 -->
+## Faults
+
+Faults happen.
+`;
+
+test("parseLibraryBook: chapter covers, topics in order, placeholders for chapters without a doc", () => {
+  const lib = parseLibraryBook([
+    { id: "c1", slug: "paging-aaaa1111", title: "paging", status: "ready", md: TWO },
+    { id: "c2", slug: "tlb-bbbb2222", title: "tlb", status: "generating", md: null },
+  ]);
+  assert.deepEqual(lib.entries.map((e) => e.kind), ["chapter", "topic", "topic", "chapter"]);
+  assert.equal(lib.chapters[0].title, "Paging");            // heading of the doc, not the file name
+  assert.equal(lib.chapters[1].title, "tlb");
+  assert.equal(lib.chapters[1].book, null);
+  assert.equal(lib.topics, 2);
+  assert.equal(pageNumber(lib, 0), 1);
+  assert.equal(pageNumber(lib, 0, 1), 3);                   // second topic of chapter 0
+  assert.equal(pageNumber(lib, 1), 4);
+  assert.equal(clampPage(99, lib), 4);
+  assert.equal(clampPage(-3, lib), 0);
+});
+
+test("parseLibraryBook: a section choice replaces only that topic", () => {
+  const lib = parseLibraryBook(
+    [{ id: "c1", slug: "p", title: "p", status: "ready", md: TWO }],
+    { "c1:1": { level: "proficient", body: "## Faults, dense\n\nREWRITTEN\n\n---" } },
+  );
+  const [first, second] = lib.chapters[0].pages;
+  assert.equal(first.title, "Basics");
+  assert.match(first.body, /Pages map/);
+  assert.equal(first.level, undefined);
+  assert.equal(second.title, "Faults, dense");
+  assert.equal(second.body, "REWRITTEN");
+  assert.equal(second.level, "proficient");
+  assert.equal(second.index, 1);                            // section index (explain, notes) is unchanged
+});

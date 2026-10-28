@@ -2,11 +2,12 @@ import { createHash } from "node:crypto";
 
 import { buildMessages, ExplainError, validateInput, type ExplainInput, type Message } from "@/lib/explain-context";
 import { LEVELS, LIMITS } from "@/lib/limits";
+import { replaceSection } from "@/lib/slide-anchors";
 import { admin, body, countSince, HttpError, requireNotebook, requireUser, route } from "@/lib/server";
 
 export const maxDuration = 60;
 
-type Req = ExplainInput & { notebook_id: string; level: string; force_cloud?: boolean; request_id?: string };
+type Req = ExplainInput & { notebook_id: string; chapter_id: string; level: string; force_cloud?: boolean; request_id?: string };
 
 /**
  * POST -> one of
@@ -28,17 +29,22 @@ export const POST = route(async (req) => {
   const db = admin();
   const nb = input.notebook_id;
 
-  const { data: doc } = await db
-    .from("documents")
-    .select("storage_path, updated_at")
-    .eq("notebook_id", nb)
-    .eq("level", input.level)
-    .maybeSingle();
-  if (!doc) throw new HttpError(404, "Generate these notes first");
+  // the chapter must be one of this notebook's PDFs
+  if (typeof input.chapter_id !== "string" || !/^[0-9a-f-]{36}$/.test(input.chapter_id)) throw new HttpError(400, "Bad chapter");
+  const { data: source } = await db.from("sources").select("id").eq("notebook_id", nb).eq("chapter_id", input.chapter_id).limit(1);
+  if (!source?.length) throw new HttpError(404, "Chapter not found");
+  const [{ data: chapter }, { data: doc }, { data: choice }] = await Promise.all([
+    db.from("chapters").select("slug").eq("id", input.chapter_id).maybeSingle(),
+    db.from("chapter_docs").select("updated_at").eq("chapter_id", input.chapter_id).eq("level", input.level).maybeSingle(),
+    db.from("section_choices").select("level").eq("notebook_id", nb).eq("chapter_id", input.chapter_id)
+      .eq("section", input.section).maybeSingle(),
+  ]);
+  if (!chapter || !doc) throw new HttpError(404, "Generate these notes first");
 
+  // the student may be reading this section at another level: explain what they see, and key the cache on it
   const cacheKey = createHash("sha256")
-    .update(JSON.stringify([nb, input.level, doc.updated_at, input.section, input.selection ?? null,
-      input.image ?? null, input.history ?? [], Boolean(input.simpler)]))
+    .update(JSON.stringify([input.chapter_id, input.level, doc.updated_at, choice?.level ?? null, input.section,
+      input.selection ?? null, input.image ?? null, input.history ?? [], Boolean(input.simpler)]))
     .digest("hex")
     .slice(0, 32);
   const { data: hit } = await db.from("explain_cache").select("answer, source").eq("key", cacheKey).maybeSingle();
@@ -58,7 +64,7 @@ export const POST = route(async (req) => {
     const w = workers?.[0];
     if (w && w.local_model && Date.now() - new Date(w.last_seen).getTime() < LIMITS.workerFreshMs) {
       const { data, error } = await db.from("explain_requests").insert({
-        notebook_id: nb, owner: user.id, level: input.level, section: input.section,
+        notebook_id: nb, chapter_id: input.chapter_id, owner: user.id, level: input.level, section: input.section,
         selection: input.selection ?? null, image: input.image ?? null, history: input.history ?? [],
         simpler: Boolean(input.simpler), cache_key: cacheKey,
       }).select("id").single();
@@ -66,39 +72,51 @@ export const POST = route(async (req) => {
       return Response.json({ request_id: data.id });
     }
   }
-  return cloudAnswer(user.id, input, doc.storage_path, cacheKey);
+  return cloudAnswer(user.id, input, chapter.slug, choice?.level ?? null, cacheKey);
 });
 
 async function download(path: string): Promise<Blob> {
-  const { data, error } = await admin().storage.from("outputs").download(path);
+  const { data, error } = await admin().storage.from("library").download(path);
   if (error || !data) throw new HttpError(404, `Missing file ${path.split("/").slice(1).join("/")}`);
   return data;
 }
 
-async function imageDataUrl(nb: string, image: string | null | undefined): Promise<string | null> {
+async function imageDataUrl(slug: string, image: string | null | undefined): Promise<string | null> {
   if (!image) return null;
   let rel = image;
   if (image.startsWith("slide:")) {
-    const index = JSON.parse(await (await download(`${nb}/slides.json`)).text()) as Record<string, { image: string }>;
+    const index = JSON.parse(await (await download(`${slug}/slides.json`)).text()) as Record<string, { image: string }>;
     const entry = index[image.slice(6)];
     if (!entry) throw new HttpError(404, "Slide not found");
     rel = entry.image;
   }
-  const blob = await download(`${nb}/${rel}`);
+  const blob = await download(`${slug}/${rel}`);
   const b64 = Buffer.from(await blob.arrayBuffer()).toString("base64");
   return `data:${blob.type || (rel.endsWith(".webp") ? "image/webp" : "image/png")};base64,${b64}`;
 }
 
-async function cloudAnswer(owner: string, input: Req, docPath: string, cacheKey: string): Promise<Response> {
+async function cloudAnswer(owner: string, input: Req, slug: string, choice: string | null, cacheKey: string): Promise<Response> {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new HttpError(503, "Explanations are offline right now (no local worker, no cloud key)");
   const model = process.env.GEMINI_EXPLAIN_MODEL || "gemini-3.1-flash-lite";
   const nb = input.notebook_id;
-  const [doc, extracts, image] = await Promise.all([
-    download(docPath).then((b) => b.text()),
-    download(`${nb}/extracts.json`).then(async (b) => JSON.parse(await b.text())),
-    imageDataUrl(nb, input.image),
+  const [loaded, extracts, image, variant] = await Promise.all([
+    download(`${slug}/${input.level}.md`).then((b) => b.text()),
+    download(`${slug}/extracts.json`).then(async (b) => JSON.parse(await b.text())),
+    imageDataUrl(slug, input.image),
+    choice
+      ? admin().from("section_variants").select("body").eq("chapter_id", input.chapter_id)
+          .eq("section", input.section).eq("level", choice).maybeSingle().then((r) => r.data)
+      : Promise.resolve(null),
   ]);
+  let doc = loaded;
+  if (variant) {
+    try {
+      doc = replaceSection(loaded, input.section, variant.body);
+    } catch {
+      /* section out of range: buildMessages reports it */
+    }
+  }
   let messages: Message[];
   try {
     messages = buildMessages(doc, extracts, input, image);
@@ -154,7 +172,7 @@ async function cloudAnswer(owner: string, input: Req, docPath: string, cacheKey:
         await Promise.all([
           db.from("explain_cache").upsert({ key: cacheKey, answer, model, source: "cloud" }),
           db.from("explain_requests").insert({
-            notebook_id: nb, owner, level: input.level, section: input.section, selection: input.selection ?? null,
+            notebook_id: nb, chapter_id: input.chapter_id, owner, level: input.level, section: input.section, selection: input.selection ?? null,
             image: input.image ?? null, history: input.history ?? [], simpler: Boolean(input.simpler),
             cache_key: cacheKey, status: "done", answer, partial_text: answer, model, source: "cloud",
           }),

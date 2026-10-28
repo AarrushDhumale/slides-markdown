@@ -10,7 +10,8 @@ import { cn } from "@/lib/cn";
 import { LIMITS } from "@/lib/limits";
 
 export type ExplainTarget = {
-  section: number;
+  chapterId: string;
+  section: number; // topic index within the chapter's doc
   selection?: string;
   image?: string; // "assets/…png" or "slide:A·4"
   label?: string; // what to show as the quoted selection
@@ -58,6 +59,7 @@ export function ExplainPanel({
       setPhase("thinking");
       const payload = {
         notebook_id: notebookId,
+        chapter_id: target.chapterId,
         level,
         section: target.section,
         selection: target.selection ?? null,

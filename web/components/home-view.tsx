@@ -77,16 +77,14 @@ export function HomeView() {
       </header>
 
       <main className="mx-auto max-w-6xl px-4 pb-24 sm:px-6">
-        <section className="mx-auto max-w-2xl pt-8 pb-10 text-center sm:pt-14">
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-3 py-1 text-xs font-medium text-muted shadow-card">
-            <Sparkles className="size-3.5 text-accent" /> Grounded in your slides, nothing made up
-          </span>
-          <h1 className="mt-5 text-[2.1rem] leading-[1.1] font-semibold tracking-[-0.03em] text-balance sm:text-5xl">
+        <section className="relative mx-auto max-w-3xl pt-10 pb-12 text-center sm:pt-20">
+          <p className="eyebrow relative">Slides → study notes</p>
+          <h1 className="relative mt-5 text-[2.4rem] leading-[1.05] font-semibold tracking-[-0.035em] text-balance sm:text-6xl">
             Turn lecture slides into notes you&apos;ll actually read.
           </h1>
-          <p className="mx-auto mt-4 max-w-lg text-[15px] leading-relaxed text-muted text-pretty sm:text-base">
-            Upload a deck and get a short summary first, then full notes, a revision sheet, an explain-it-simply version
-            and a quiz, all from the same slides.
+          <p className="relative mx-auto mt-5 max-w-lg text-[15px] leading-relaxed text-muted text-pretty sm:text-base">
+            Upload a deck. Get a summary first, then full notes, a revision sheet, an explain-it-simply version and a
+            quiz, all grounded in your slides.
           </p>
         </section>
 

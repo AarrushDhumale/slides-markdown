@@ -1,7 +1,10 @@
 import { LEVELS, LIMITS, type Level } from "@/lib/limits";
+import { missingLevels } from "@/lib/library";
 import { admin, body, countSince, HttpError, requireNotebook, requireUser, route } from "@/lib/server";
 
-// POST { notebook_id, levels } -> { id }: queue a conversion. The first job makes learner + summary
+// POST { notebook_id, levels } -> { id } | { ready: true }: queue a conversion. Chapters (one per PDF) that already
+// have every requested level, made for any notebook, are not generated again: when nothing is missing no job is
+// queued and no quota is used. The first job makes learner + summary
 // (the summary is condensed from the learner doc, and the quiz comes from it); other levels on demand.
 export const POST = route(async (req) => {
   const user = await requireUser(req);
@@ -14,11 +17,25 @@ export const POST = route(async (req) => {
   if ((wanted.includes("summary") || wanted.includes("notes")) && !wanted.includes("learner")) wanted.push("learner");
 
   const db = admin();
-  const { count: sources } = await db
-    .from("sources")
-    .select("*", { count: "exact", head: true })
-    .eq("notebook_id", notebook_id);
-  if (!sources) throw new HttpError(400, "Add a PDF first");
+  const { data: sources } = await db.from("sources").select("chapter_id").eq("notebook_id", notebook_id);
+  if (!sources?.length) throw new HttpError(400, "Add a PDF first");
+  // a source the worker hasn't registered yet (no chapter_id) always needs a job
+  const chapterIds = [...new Set(sources.map((s) => s.chapter_id).filter((id): id is string => !!id))];
+  const unregistered = sources.some((s) => !s.chapter_id);
+  const { data: docs } = chapterIds.length
+    ? await db.from("chapter_docs").select("chapter_id, level").in("chapter_id", chapterIds)
+    : { data: [] };
+  const { data: known } = chapterIds.length ? await db.from("chapters").select("pages").in("id", chapterIds) : { data: [] };
+  const missing = chapterIds.some((id) =>
+    missingLevels((docs ?? []).filter((d) => d.chapter_id === id).map((d) => d.level), wanted).length > 0,
+  );
+  if (!unregistered && !missing) {
+    // everything exists already (made for someone else): no job will run, so mark the notebook ready here
+    await db.from("notebooks")
+      .update({ status: "ready", slide_count: (known ?? []).reduce((n, c) => n + (c.pages ?? 0), 0), updated_at: new Date().toISOString() })
+      .eq("id", notebook_id).in("status", ["empty", "failed"]);
+    return Response.json({ ready: true });
+  }
 
   // an active job already making these levels: reuse it instead of paying twice
   const { data: active } = await db

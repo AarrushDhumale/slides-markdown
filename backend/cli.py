@@ -4,6 +4,7 @@
   s2m inbox --level all                  # every subfolder of data/inbox = one chapter
   s2m usage [--month 2026-10]           # API tokens and $ spent, by backend and job
   s2m worker                             # web app: process queued jobs + "Explain this" requests
+  s2m library [--missing]                # web app: which chapters/levels are already generated
   s2m server setup|up|status|down [--backend dashbw]
 """
 
@@ -154,6 +155,29 @@ def cmd_worker(args):
     run_worker(backend=args.backend, once=args.once, layout=args.layout)
 
 
+def cmd_library(args):
+    import os
+    from backend.worker import Supabase
+
+    url, key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SERVICE_KEY")
+    if not url or not key:
+        raise SystemExit("set SUPABASE_URL and SUPABASE_SERVICE_KEY (e.g. in .env)")
+    db = Supabase(url, key)
+    docs: dict[str, dict[str, int]] = {}
+    for d in db.select("chapter_docs", "select=chapter_id,level,word_count"):
+        docs.setdefault(d["chapter_id"], {})[d["level"]] = d["word_count"]
+    rows = db.select("chapters", "order=created_at.asc")
+    shown = 0
+    for c in rows:
+        have = docs.get(c["id"], {})
+        if args.missing and c["status"] == "ready" and {"learner", "summary"} <= set(have):
+            continue
+        shown += 1
+        levels = ", ".join(f"{lv} ({n})" for lv, n in sorted(have.items())) or "-"
+        print(f"{c['slug']:<48} {c['status']:<11} {levels}")
+    print(f"{shown} of {len(rows)} chapters" + (" (not fully generated)" if args.missing else ""))
+
+
 def main(argv=None):
     try:  # API keys and spend caps from .env (see .env.example)
         from dotenv import load_dotenv
@@ -205,6 +229,10 @@ def main(argv=None):
                    help="topics (default): all PDFs merged into one flat book of topic sections; "
                         "chapters: auto-detected chapters")
     w.set_defaults(func=cmd_worker)
+
+    lib = sub.add_parser("library", help="the shared chapter library: which chapters/levels are generated")
+    lib.add_argument("--missing", action="store_true", help="only chapters without learner + summary docs")
+    lib.set_defaults(func=cmd_library)
 
     s = sub.add_parser("server", help="manage the on-demand vLLM server")
     s.add_argument("action", choices=["setup", "up", "status", "down"])

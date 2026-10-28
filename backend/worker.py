@@ -6,9 +6,14 @@ the laptop now, a Cloud Run Job later. Two loops share one process:
   * explain: claim queued explain requests -> stream a short answer into the row (Realtime pushes it)
 plus a heartbeat so the web app can show "generator offline" and route explanations to the cloud.
 
-Local layout (never data/chapters/): data/web/notebooks/<notebook id>/{pdfs/, chapter/}.
+A notebook is a list of chapters, one per uploaded PDF. A chapter is identified by the PDF's content hash and
+lives in a shared library, so a PDF someone already converted is never converted (or paid for) again, and each
+chapter is published as soon as it is written.
+
+Local layout (never data/chapters/): data/web/notebooks/<notebook id>/pdfs/ (downloads) and
+data/web/library/<chapter slug>/ (the pipeline's working dir for that chapter).
 Storage layout: pdfs/<notebook>/<source>.pdf (uploaded by the browser) and
-outputs/<notebook>/{<level>.md, assets/*, slides/<A-004>.webp, slides.json, extracts.json, quiz.json}.
+library/<chapter slug>/{<level>.md, assets/*, slides/<A-004>.webp, slides.json, extracts.json, quiz.json}.
 """
 
 from __future__ import annotations
@@ -35,10 +40,14 @@ from backend.llm.client import make_llm, stage_llm
 from backend.llm.usage import BudgetExceeded
 from backend.paths import DATA_ROOT
 from backend.pipeline.chapter import Chapter, slide_file_id
-from backend.pipeline.explain import ExplainError, ExplainRequest, build_messages, explain
+from backend.pipeline.explain import (ExplainError, ExplainRequest, build_messages, explain, replace_section,
+                                       split_sections)
+from backend.pipeline.ingest import file_sha
 from backend.pipeline.quiz import extract_quiz
 
 WEB_DIR = DATA_ROOT / "web" / "notebooks"
+LIBRARY_DIR = DATA_ROOT / "web" / "library"
+CHAPTER_WAIT = 20 * 60             # seconds to wait for another job generating the same chapter
 JOB_POLL = 5.0
 EXPLAIN_POLL = (1.0, 3.0)          # busy / idle poll interval, seconds
 HEARTBEAT_EVERY = 20.0
@@ -71,6 +80,9 @@ class Supabase:
     def select(self, table: str, query: str) -> list[dict]:
         return self._check(self.http.get(f"{self.url}/rest/v1/{table}?{query}")).json()
 
+    def insert(self, table: str, row: dict) -> None:
+        self._check(self.http.post(f"{self.url}/rest/v1/{table}", json=row, headers={"Prefer": "return=minimal"}))
+
     def update(self, table: str, match: dict, data: dict) -> None:
         q = "&".join(f"{k}=eq.{quote(str(v))}" for k, v in match.items())
         self._check(self.http.patch(f"{self.url}/rest/v1/{table}?{q}", json=data,
@@ -90,13 +102,15 @@ class Supabase:
 
 
 @dataclass
-class WebChapter(Chapter):
-    """A notebook's chapter, kept under data/web/ instead of data/chapters/."""
-    root: Path = WEB_DIR
+class LibraryChapter(Chapter):
+    """One PDF of the shared library, kept under data/web/library/<key> instead of data/chapters/.
+    Its caches live in that folder, so every notebook containing the PDF reuses them."""
+    key: str = ""
+    root: Path = LIBRARY_DIR
 
     @property
     def dir(self) -> Path:
-        return self.root / "chapter"
+        return self.root / self.key
 
 
 def _now() -> str:
@@ -133,13 +147,13 @@ class Worker:
             raise ValueError(f"bad notebook id {notebook_id!r}")
         return WEB_DIR / notebook_id
 
-    def fetch_sources(self, notebook_id: str) -> list[Path]:
+    def fetch_sources(self, notebook_id: str) -> list[tuple[dict, Path]]:
         rows = self.db.select("sources", f"notebook_id=eq.{notebook_id}&order=position.asc,created_at.asc")
         if not rows:
             raise ValueError("this notebook has no PDFs")
         pdf_dir = self.notebook_dir(notebook_id) / "pdfs"
         pdf_dir.mkdir(parents=True, exist_ok=True)
-        paths, used, total = [], set(), 0
+        found, used, total = [], set(), 0
         for row in rows:
             name = _safe_name(row["filename"])
             while name in used:  # two uploads with the same filename stay separate decks
@@ -155,51 +169,130 @@ class Worker:
                 raise ValueError(f"{row['filename']} is not a readable PDF ({e})") from e
             if row.get("pages") != pages:
                 self.db.update("sources", {"id": row["id"]}, {"pages": pages})
-            paths.append(path)
+                row["pages"] = pages
+            found.append((row, path))
             total += pages
         if total > MAX_PAGES:
             raise ValueError(f"this notebook has {total} slides; the limit is {MAX_PAGES} per notebook")
         self.db.update("notebooks", {"id": notebook_id}, {"slide_count": total})
-        return paths
+        return found
+
+    def ensure_chapter(self, row: dict, path: Path) -> dict:
+        """The library row for a source's PDF (created here if the web app has not registered it yet)."""
+        if row.get("chapter_id"):
+            found = self.db.select("chapters", f"id=eq.{row['chapter_id']}")
+            if found:
+                return found[0]
+        sha = file_sha(path)
+        found = self.db.select("chapters", f"sha=eq.{sha}")
+        if not found:
+            stem = Path(row["filename"]).stem
+            base = re.sub(r"[^a-z0-9]+", "-", stem.lower()).strip("-")[:60].strip("-")
+            try:
+                self.db.insert("chapters", {"sha": sha, "slug": f"{base}-{sha[:8]}" if base else sha[:8],
+                                            "title": stem[:200] or "Slides", "filename": row["filename"],
+                                            "pages": row.get("pages")})
+            except SupabaseError:  # the web app registered it a moment ago
+                pass
+            found = self.db.select("chapters", f"sha=eq.{sha}")
+        self.db.update("sources", {"id": row["id"]}, {"sha": sha, "chapter_id": found[0]["id"]})
+        if not found[0].get("pages") and row.get("pages"):  # the web app registered it before the page count was known
+            self.db.update("chapters", {"id": found[0]["id"]}, {"pages": row["pages"]})
+            found[0]["pages"] = row["pages"]
+        return found[0]
+
+    def missing_levels(self, chapter: dict, levels: list[str]) -> list[str]:
+        """The levels still to generate for this chapter. The summary and notes are condensed from the
+        learner doc (and the quiz comes from it), so a missing learner doc is made along with them."""
+        have = {d["level"] for d in self.db.select("chapter_docs", f"chapter_id=eq.{chapter['id']}")}
+        need = [lv for lv in levels if lv not in have and lv != "quiz"]
+        if {"summary", "notes"} & set(need) and "learner" not in have and "learner" not in need:
+            need.append("learner")
+        return need
 
     def run_job(self, job: dict) -> None:
-        from backend.pipeline.run import convert_chapter
-
         nb = job["notebook_id"]
-        notebook = self.db.select("notebooks", f"id=eq.{nb}&select=title")
-        title = (notebook[0]["title"] if notebook else None) or "Lecture notes"
-        root = self.notebook_dir(nb)
-        chapter = WebChapter(title, self.fetch_sources(nb), root=root)
-        levels = list(job["levels"])
-        if {"summary", "notes"} & set(levels) and "learner" not in levels:
-            levels.append("learner")  # written anyway to make the summary/notes; the quiz comes from it
+        chapters, seen = [], set()
+        for row, path in self.fetch_sources(nb):
+            chapter = self.ensure_chapter(row, path)
+            if chapter["id"] not in seen:  # the same PDF twice in a notebook is one chapter
+                seen.add(chapter["id"])
+                chapters.append((chapter, path))
+        current: list[dict] = [{}]
         last = [0.0]
 
         def progress(stage: str, done: int, total: int) -> None:
+            if stage == "done":  # one chapter finished; the job finishes after the last one
+                return
             now = time.monotonic()
-            if stage != "done" and now - last[0] < PROGRESS_EVERY and done != total:
+            if now - last[0] < PROGRESS_EVERY and done != total:
                 return
             last[0] = now
-            if stage == "done":  # convert_chapter reports elapsed seconds here, not a count
-                done, total = 1, 1
             try:
                 self.db.update("jobs", {"id": job["id"]}, {
                     "stage": stage, "done": done, "total": total, "heartbeat_at": _now(),
                     "cost_usd": round(usage.job_spend(job["id"]), 6)})
+                if current[0]:
+                    self.db.update("chapters", {"id": current[0]["id"]}, {"heartbeat_at": _now()})
             except (SupabaseError, httpx.HTTPError) as e:  # progress is cosmetic; never fail the job on it
                 print(f"  ! progress update failed: {e}")
 
         usage.set_job(job["id"])
+        failures = []
         try:
-            outputs = convert_chapter(chapter, levels, self.backend, progress,
-                                      by_topic=self.layout == "topics")
-            self.upload_outputs(nb, chapter, outputs)
+            for i, (chapter, path) in enumerate(chapters):
+                current[0] = chapter
+                self.db.update("jobs", {"id": job["id"]}, {
+                    "chapter_id": chapter["id"], "chapters_done": i, "chapters_total": len(chapters),
+                    "heartbeat_at": _now()})
+                try:
+                    self.build_chapter(job, chapter, path, progress)
+                except (BudgetExceeded, KeyboardInterrupt):
+                    self._release_chapter(chapter)
+                    raise
+                except Exception as e:  # one bad chapter must not stop the others
+                    traceback.print_exc()
+                    message = f"{type(e).__name__}: {e}"
+                    self.db.update("chapters", {"id": chapter["id"]}, {
+                        "status": "failed", "error": message[:500], "updated_at": _now()})
+                    failures.append(f"{chapter['title']}: {message}")
+            if failures:
+                raise RuntimeError(f"{len(failures)} of {len(chapters)} chapters failed. " + "; ".join(failures))
             self.db.update("jobs", {"id": job["id"]}, {
                 "status": "done", "stage": "done", "finished_at": _now(), "error": None,
+                "chapters_done": len(chapters), "chapters_total": len(chapters),
                 "cost_usd": round(usage.job_spend(job["id"]), 6)})
             self.db.update("notebooks", {"id": nb}, {"status": "ready", "updated_at": _now()})
         finally:
             usage.set_job(None)
+
+    def build_chapter(self, job: dict, chapter: dict, path: Path, progress) -> None:
+        """Generate what this chapter is missing and publish it; a chapter that already has every
+        requested level (made for any notebook) costs nothing."""
+        from backend.pipeline.run import convert_chapter
+
+        deadline = time.monotonic() + CHAPTER_WAIT
+        while True:
+            need = self.missing_levels(chapter, list(job["levels"]))
+            if not need:
+                print(f"   chapter {chapter['slug']}: already generated")
+                return
+            if self.db.rpc("claim_chapter", {"p_chapter": chapter["id"], "p_job": job["id"]}):
+                break
+            if time.monotonic() > deadline:  # another job is generating it; its result is used once it lands
+                raise RuntimeError("another job has been generating this chapter for too long")
+            self.stop.wait(JOB_POLL)
+        print(f"   chapter {chapter['slug']}: generating {need}")
+        library = LibraryChapter(chapter["title"], [path], key=chapter["slug"], root=LIBRARY_DIR)
+        outputs = convert_chapter(library, need, self.backend, progress, by_topic=self.layout == "topics")
+        self.upload_chapter(chapter, library, outputs)
+
+    def _release_chapter(self, chapter: dict) -> None:
+        """Hand a chapter back after an interrupt or spend cap, so the next job can generate it."""
+        try:
+            self.db.update("chapters", {"id": chapter["id"]}, {"status": "new", "generating_job": None})
+        except (SupabaseError, httpx.HTTPError):
+            pass
 
     def _upload_once(self, root: Path, bucket: str, key: str, path: Path, data: bytes | None = None,
                      content_type: str | None = None) -> None:
@@ -214,14 +307,15 @@ class Worker:
         index[key] = stamp
         index_path.write_text(json.dumps(index))
 
-    def upload_outputs(self, nb: str, chapter: WebChapter, outputs: dict[str, Path]) -> None:
-        root = chapter.root
-        prefix = nb
-        assets = chapter.dir / "assets"
+    def upload_chapter(self, chapter: dict, library: LibraryChapter, outputs: dict[str, Path]) -> None:
+        """Publish a chapter's files to the library bucket, then its chapter_docs rows (which is what
+        the web app listens to), so it shows up in every notebook containing it right away."""
+        prefix, root = chapter["slug"], library.dir
+        assets = library.dir / "assets"
         for f in sorted(assets.glob("*")) if assets.exists() else []:
-            self._upload_once(root, "outputs", f"{prefix}/assets/{f.name}", f)
-        slides = json.loads((chapter.dir / "slides.json").read_text())
-        extracts = json.loads((chapter.dir / "extracts.json").read_text())
+            self._upload_once(root, "library", f"{prefix}/assets/{f.name}", f)
+        slides = json.loads((library.dir / "slides.json").read_text())
+        extracts = json.loads((library.dir / "extracts.json").read_text())
         index = {}
         for sid, info in slides.items():
             src = Path(info["image"])
@@ -232,28 +326,37 @@ class Worker:
                     img = img.resize((SLIDE_IMAGE_WIDTH, round(img.height * SLIDE_IMAGE_WIDTH / img.width)))
                 buf = BytesIO()
                 img.save(buf, "WEBP", quality=80)
-                self._upload_once(root, "outputs", key, src, buf.getvalue(), "image/webp")
+                self._upload_once(root, "library", key, src, buf.getvalue(), "image/webp")
             target = info.get("duplicate_of") or sid
             index[sid] = {"image": f"slides/{slide_file_id(target)}.webp",
                           "title": (extracts.get(sid) or extracts.get(target) or {}).get("title", "")}
-        self.db.upload("outputs", f"{prefix}/slides.json", json.dumps(index, ensure_ascii=False).encode(),
+        self.db.upload("library", f"{prefix}/slides.json", json.dumps(index, ensure_ascii=False).encode(),
                        "application/json")
-        self.db.upload("outputs", f"{prefix}/extracts.json", json.dumps(extracts, ensure_ascii=False).encode(),
+        self.db.upload("library", f"{prefix}/extracts.json", json.dumps(extracts, ensure_ascii=False).encode(),
                        "application/json")
-        docs = []
+        docs, title = [], None
         for level, path in outputs.items():
+            if level == "papers":
+                continue
             md = path.read_text()
-            self.db.upload("outputs", f"{prefix}/{level}.md", md.encode(), "text/markdown; charset=utf-8")
-            docs.append({"notebook_id": nb, "level": level, "storage_path": f"{prefix}/{level}.md",
-                         "word_count": len(md.split()), "updated_at": _now()})
+            title = title or next((ln[2:].strip() for ln in md.splitlines() if ln.startswith("# ")), None)
+            self.db.upload("library", f"{prefix}/{level}.md", md.encode(), "text/markdown; charset=utf-8")
+            docs.append({"chapter_id": chapter["id"], "level": level, "storage_path": f"{prefix}/{level}.md",
+                         "word_count": len(md.split()), "sections": md.count("<!-- slides "),
+                         "updated_at": _now()})
             if level == "learner":
                 quiz = extract_quiz(md)
-                self.db.upload("outputs", f"{prefix}/quiz.json", json.dumps(quiz, ensure_ascii=False).encode(),
+                self.db.upload("library", f"{prefix}/quiz.json", json.dumps(quiz, ensure_ascii=False).encode(),
                                "application/json")
-                docs.append({"notebook_id": nb, "level": "quiz", "storage_path": f"{prefix}/quiz.json",
-                             "word_count": sum(len(c["questions"]) for c in quiz), "updated_at": _now()})
+                docs.append({"chapter_id": chapter["id"], "level": "quiz", "storage_path": f"{prefix}/quiz.json",
+                             "word_count": sum(len(c["questions"]) for c in quiz), "sections": len(quiz),
+                             "updated_at": _now()})
         if docs:
-            self.db.upsert("documents", docs, "notebook_id,level")
+            self.db.upsert("chapter_docs", docs, "chapter_id,level")
+        update = {"status": "ready", "generating_job": None, "error": None, "updated_at": _now()}
+        if title:
+            update["title"] = title[:200]
+        self.db.update("chapters", {"id": chapter["id"]}, update)
 
     def job_loop(self) -> None:
         while not self.stop.is_set():
@@ -319,34 +422,46 @@ class Worker:
                 return members[0]
         return llm
 
-    def _notebook_file(self, nb: str, rel: str) -> Path:
-        """A generated file for this notebook: local copy if present, else fetched from Storage."""
-        local = self.notebook_dir(nb) / "chapter" / rel
+    def _chapter_file(self, slug: str, rel: str) -> Path:
+        """A generated file of a library chapter: the local working copy if present, else fetched from Storage."""
+        local = LIBRARY_DIR / slug / rel
         if not local.exists():
-            cached = self.notebook_dir(nb) / "fetched" / rel
+            cached = LIBRARY_DIR / slug / "fetched" / rel
             if not cached.exists():
                 cached.parent.mkdir(parents=True, exist_ok=True)
-                cached.write_bytes(self.db.download("outputs", f"{nb}/{rel}"))
+                cached.write_bytes(self.db.download("library", f"{slug}/{rel}"))
             return cached
         return local
 
     def answer_explain(self, row: dict) -> None:
-        nb = row["notebook_id"]
+        nb, chapter_id = row["notebook_id"], row.get("chapter_id")
+        found = self.db.select("chapters", f"id=eq.{chapter_id}") if chapter_id else []
+        if not found:
+            raise ExplainError("chapter not found")
+        slug = found[0]["slug"]
         req = ExplainRequest(section=row["section"], selection=row.get("selection"), image=row.get("image"),
                              history=row.get("history") or [], simpler=bool(row.get("simpler")))
-        doc = self._notebook_file(nb, f"{row['level']}.md").read_text()
-        extracts = json.loads(self._notebook_file(nb, "extracts.json").read_text())
+        doc = self._chapter_file(slug, f"{row['level']}.md").read_text()
+        extracts = json.loads(self._chapter_file(slug, "extracts.json").read_text())
+        # the reader shows this notebook's per-section level choice; explain what the student is looking at
+        choice = self.db.select("section_choices",
+                                f"notebook_id=eq.{nb}&chapter_id=eq.{chapter_id}&section=eq.{req.section}")
+        if choice:
+            variant = self.db.select("section_variants", f"chapter_id=eq.{chapter_id}&section=eq.{req.section}"
+                                                         f"&level=eq.{choice[0]['level']}")
+            if variant and 0 <= req.section < len(split_sections(doc)):
+                doc = replace_section(doc, req.section, variant[0]["body"])
 
         def resolve_image(ref: str) -> Path | None:
             if ref.startswith("slide:"):
                 sid = ref[6:]
-                slides_file = self.notebook_dir(nb) / "chapter" / "slides.json"
+                slides_file = LIBRARY_DIR / slug / "slides.json"
                 if slides_file.exists():
                     info = json.loads(slides_file.read_text()).get(sid)
                     if info and Path(info["image"]).exists():
                         return Path(info["image"])
-                return self._notebook_file(nb, f"slides/{slide_file_id(sid)}.webp")
-            return self._notebook_file(nb, ref)
+                return self._chapter_file(slug, f"slides/{slide_file_id(sid)}.webp")
+            return self._chapter_file(slug, ref)
 
         messages = build_messages(doc, extracts, req, resolve_image)
         llm = self.explain_llm()

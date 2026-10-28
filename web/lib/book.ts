@@ -71,3 +71,86 @@ export function parseBook(md: string): Book {
     minutes: pages.reduce((n, p) => n + p.minutes, 0) || minutesFor(md),
   };
 }
+
+// ---------- a notebook = several chapters (one per PDF), each a book of topics ----------
+
+export type ChapterStatus = "new" | "generating" | "ready" | "failed";
+
+/** One library chapter as the reader receives it: `md` is null until its doc for this level exists. */
+export type ChapterInput = {
+  id: string;
+  slug: string;
+  title: string;
+  status: ChapterStatus;
+  error?: string | null;
+  md: string | null;
+};
+
+/** A section rewritten at another level (kept per notebook), keyed by `${chapter id}:${section}`. */
+export type Variant = { level: string; body: string };
+
+export type LibPage = BookPage & { chapterIdx: number; chapterId: string; slug: string; level?: string };
+
+export type LibChapter = {
+  id: string;
+  slug: string;
+  title: string;
+  status: ChapterStatus;
+  error: string | null;
+  book: Book | null; // null while the chapter has no doc yet
+  pages: LibPage[];
+};
+
+/** Reading order: Cover (index 0), then per chapter its cover followed by its topics. */
+export type Entry = { kind: "chapter"; chapterIdx: number } | { kind: "topic"; chapterIdx: number; page: LibPage };
+
+export type LibraryBook = {
+  chapters: LibChapter[];
+  entries: Entry[]; // entry i is shown as page i + 1
+  slideCount: number;
+  minutes: number;
+  topics: number;
+};
+
+export function parseLibraryBook(inputs: ChapterInput[], variants: Record<string, Variant> = {}): LibraryBook {
+  const chapters: LibChapter[] = inputs.map((c, chapterIdx) => {
+    const book = c.md ? parseBook(c.md) : null;
+    const pages: LibPage[] = (book?.pages ?? []).map((p) => {
+      const v = variants[`${c.id}:${p.index}`];
+      let page: BookPage = p;
+      if (v) {
+        const { title, body } = splitTitle(trimRules(v.body), p.title);
+        page = { ...p, title, body, minutes: minutesFor(body) };
+      }
+      return { ...page, chapterIdx, chapterId: c.id, slug: c.slug, level: v?.level };
+    });
+    // the chapter's own title comes from its doc's heading once it exists
+    return { id: c.id, slug: c.slug, title: book?.title ?? c.title, status: c.status, error: c.error ?? null, book, pages };
+  });
+  const entries: Entry[] = chapters.flatMap((c, chapterIdx) => [
+    { kind: "chapter" as const, chapterIdx },
+    ...c.pages.map((page) => ({ kind: "topic" as const, chapterIdx, page })),
+  ]);
+  return {
+    chapters,
+    entries,
+    slideCount: chapters.reduce((n, c) => n + (c.book?.slideCount ?? 0), 0),
+    minutes: chapters.reduce((n, c) => n + c.pages.reduce((m, p) => m + p.minutes, 0), 0),
+    topics: chapters.reduce((n, c) => n + c.pages.length, 0),
+  };
+}
+
+/** Where `?p=` / the stored place points: entry index (1-based page number), clamped. */
+export function clampPage(n: number, book: LibraryBook): number {
+  return Math.min(Math.max(0, Math.trunc(n) || 0), book.entries.length);
+}
+
+/** Page number of a chapter's cover, or of one of its topics. */
+export function pageNumber(book: LibraryBook, chapterIdx: number, section?: number): number {
+  const i = book.entries.findIndex((e) =>
+    section === undefined
+      ? e.kind === "chapter" && e.chapterIdx === chapterIdx
+      : e.kind === "topic" && e.chapterIdx === chapterIdx && e.page.index === section,
+  );
+  return i < 0 ? 0 : i + 1;
+}

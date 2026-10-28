@@ -40,6 +40,20 @@ export async function requireNotebook(userId: string, notebookId: unknown): Prom
   return data as NotebookRow;
 }
 
+export type ChapterRow = { id: string; slug: string; title: string };
+
+/** A library chapter that is one of this notebook's PDFs (a user can only touch chapters they have). */
+export async function requireChapter(notebookId: string, chapterId: unknown): Promise<ChapterRow> {
+  if (typeof chapterId !== "string" || !/^[0-9a-f-]{36}$/.test(chapterId)) throw new HttpError(400, "Bad chapter");
+  const db = admin();
+  const { data: source } = await db.from("sources").select("id").eq("notebook_id", notebookId)
+    .eq("chapter_id", chapterId).limit(1);
+  if (!source?.length) throw new HttpError(404, "Chapter not found");
+  const { data } = await db.from("chapters").select("id, slug, title").eq("id", chapterId).maybeSingle();
+  if (!data) throw new HttpError(404, "Chapter not found");
+  return data as ChapterRow;
+}
+
 export async function body<T>(req: Request): Promise<T> {
   try {
     return (await req.json()) as T;
