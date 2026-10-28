@@ -7,3 +7,4 @@ eval/results/
 .env
 web/public/demo-*/
 !web/public/demo/
+supabase/migrations/supabase_codes.txt
