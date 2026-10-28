@@ -49,7 +49,7 @@ export async function api<T>(path: string, payload: unknown): Promise<T> {
   return (await apiRaw(path, payload)).json() as Promise<T>;
 }
 
-// ---------- row types (see supabase/migrations/001_init.sql) ----------
+// ---------- row types (see supabase/migrations/001_init.sql and 003_library.sql) ----------
 
 export type Notebook = {
   id: string;
@@ -59,7 +59,14 @@ export type Notebook = {
   created_at: string;
   updated_at: string;
 };
-export type Source = { id: string; filename: string; size_bytes: number; pages: number | null; position: number };
+export type Source = {
+  id: string;
+  filename: string;
+  size_bytes: number;
+  pages: number | null;
+  position: number;
+  chapter_id: string | null;
+};
 export type Job = {
   id: string;
   levels: string[];
@@ -69,9 +76,22 @@ export type Job = {
   total: number;
   error: string | null;
   cost_usd: number;
+  chapter_id: string | null; // the chapter being generated right now
+  chapters_done: number;
+  chapters_total: number;
   created_at: string;
 };
-export type Doc = { level: string; storage_path: string; word_count: number; updated_at: string };
+/** A library chapter (one PDF, shared by every notebook containing it). */
+export type Chapter = {
+  id: string;
+  slug: string;
+  title: string;
+  status: "new" | "generating" | "ready" | "failed";
+  error: string | null;
+};
+export type ChapterDoc = { chapter_id: string; level: string; storage_path: string; word_count: number; updated_at: string };
+export type Choice = { chapter_id: string; section: number; level: string };
+export type Note = { chapter_id: string; section: number; body: string; updated_at: string };
 export type WorkerStatus = { id: string; last_seen: string; busy: boolean; local_model: boolean };
 
 /** Upload PDFs into a notebook (signed URL per file), then register them. */

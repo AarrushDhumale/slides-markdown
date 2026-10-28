@@ -3,6 +3,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Popover from "@radix-ui/react-popover";
 import {
+  AlertTriangle,
   ArrowLeft,
   ArrowRight,
   BookOpen,
@@ -11,6 +12,8 @@ import {
   Download,
   GalleryHorizontalEnd,
   ListTree,
+  Loader2,
+  NotebookPen,
   Printer,
   ScrollText,
   Sparkles,
@@ -20,11 +23,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ExplainPanel, type ExplainTarget } from "@/components/explain-panel";
 import { Markdown, type ImageHandlers } from "@/components/markdown";
+import { NotesPanel, type NotesApi, type NoteTarget } from "@/components/notes-panel";
+import { SectionLevelMenu } from "@/components/section-level-menu";
 import { Button } from "@/components/ui/button";
-import { parseBook, type BookPage } from "@/lib/book";
+import { pageNumber, type Entry, type LibChapter, type LibPage, type LibraryBook } from "@/lib/book";
 import { supabase } from "@/lib/client";
 import { cn } from "@/lib/cn";
 import { demoDir } from "@/lib/demo";
+import { sectionKey } from "@/lib/library";
+import type { RewriteLevel } from "@/lib/limits";
 import { assetPaths } from "@/lib/slide-anchors";
 
 export type SlideIndex = Record<string, { image: string; title: string }>;
@@ -38,7 +45,10 @@ const LEVEL_NAMES: Record<string, string> = {
   donkey: "Explain simply",
 };
 
-/** Signed URLs for this notebook's generated files (`assets/x.png`, `slides/A-004.webp`), cached. */
+/**
+ * Signed URLs for generated files of library chapters. Paths are `<chapter slug>/assets/x.png` or
+ * `<chapter slug>/slides/A-004.webp`; the result is keyed by the same path. Cached.
+ */
 export function useSignedUrls(notebookId: string) {
   const [urls, setUrls] = useState<Record<string, string>>({});
   const pending = useRef(new Set<string>());
@@ -48,10 +58,11 @@ export function useSignedUrls(notebookId: string) {
       if (!todo.length) return;
       todo.forEach((p) => pending.current.add(p));
       if (notebookId === "demo") {
-        setUrls((u) => ({ ...u, ...Object.fromEntries(todo.map((p) => [p, `/${demoDir()}/${p}`])) }));
+        // the demo has one chapter whose files sit directly in the demo folder
+        setUrls((u) => ({ ...u, ...Object.fromEntries(todo.map((p) => [p, `/${demoDir()}/${p.split("/").slice(1).join("/")}`])) }));
         return;
       }
-      const { data } = await supabase().storage.from("outputs").createSignedUrls(todo.map((p) => `${notebookId}/${p}`), 3600);
+      const { data } = await supabase().storage.from("library").createSignedUrls(todo, 3600);
       const next: Record<string, string> = {};
       data?.forEach((d, i) => d.signedUrl && (next[todo[i]] = d.signedUrl));
       setUrls((u) => ({ ...u, ...next }));
@@ -77,61 +88,95 @@ function save(key: string, value: string) {
   }
 }
 
+/** Stable identity of a page (page numbers shift while chapters are still arriving). */
+const entryKey = (e: Entry, book: LibraryBook) => (e.kind === "chapter" ? `c:${book.chapters[e.chapterIdx].slug}` : `t:${e.page.slug}:${e.page.index}`);
+const readKey = (p: LibPage) => `${p.slug}:${p.index}`;
+
+function composeMarkdown(title: string, book: LibraryBook): string {
+  return [
+    `# ${title}`,
+    ...book.chapters.flatMap((c) =>
+      c.book ? [`## ${c.title}`, c.book.intro, ...c.pages.map((p) => `### ${p.title}\n\n${p.body}`)] : [`## ${c.title}\n\n_Not generated yet._`],
+    ),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
 export function Reader({
   notebookId,
+  notebookTitle,
   level,
-  md,
+  book,
   slides,
+  rewriting,
+  notes,
+  onChoose,
+  onGenerate,
 }: {
   notebookId: string;
+  notebookTitle: string;
   level: string;
-  md: string;
-  slides: SlideIndex | null;
+  book: LibraryBook;
+  slides: Record<string, SlideIndex | null>; // by chapter slug
+  rewriting: string | null; // sectionKey of the topic being rewritten
+  notes: NotesApi;
+  onChoose: (chapterId: string, section: number, level: RewriteLevel | null) => void;
+  onGenerate: () => void;
 }) {
-  const book = useMemo(() => parseBook(md), [md]);
-  const total = book.pages.length;
+  const { entries } = book;
+  const total = entries.length;
   const hasPages = total > 0;
+  const keys = useMemo(() => entries.map((e) => entryKey(e, book)), [entries, book]);
   const { urls, request } = useSignedUrls(notebookId);
 
   // Mounted only after the notes were fetched in the browser, so reading localStorage here is safe.
   const [mode, setMode] = useState<Mode>(() => stored(`mode:${notebookId}`, "book", (r) => (r === "scroll" ? "scroll" : "book")));
-  const [page, setPage] = useState<number>(() => {
-    const q = Number(new URLSearchParams(location.search).get("p")); // ?p=3 opens topic 3 (handy for links and screenshots)
-    return q > 0 ? Math.min(q, total) : stored(`page:${notebookId}`, 0, (r) => Math.min(Math.max(0, Number(r) || 0), total));
+  const [at, setAt] = useState<string>(() => {
+    const q = Number(new URLSearchParams(location.search).get("p")); // ?p=3 opens page 3 (handy for links and screenshots)
+    if (q > 0 && q <= keys.length) return keys[q - 1];
+    return stored(`page:${notebookId}`, "cover", (r) => r);
   });
-  const [read, setRead] = useState<Set<number>>(() => stored(`read:${notebookId}`, new Set<number>(), (r) => new Set<number>(JSON.parse(r))));
+  const [read, setRead] = useState<Set<string>>(() =>
+    stored(`read:${notebookId}`, new Set<string>(), (r) => new Set<string>((JSON.parse(r) as unknown[]).filter((x): x is string => typeof x === "string"))),
+  );
   const [dir, setDir] = useState<"next" | "prev">("next");
   const [printing, setPrinting] = useState(false);
   const [zoom, setZoom] = useState<{ url: string; alt: string } | null>(null);
   const [target, setTarget] = useState<ExplainTarget | null>(null);
   const [pick, setPick] = useState<ExplainTarget | null>(null); // floating "Explain" button for a text selection
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [scrollNote, setScrollNote] = useState<NoteTarget | null>(null);
   const container = useRef<HTMLDivElement>(null);
 
+  const page = at === "cover" ? 0 : keys.indexOf(at) + 1; // a place that no longer exists falls back to the cover
+  const entry = page > 0 ? entries[page - 1] : null;
   const showAll = mode === "scroll" || printing || !hasPages;
 
   const go = useCallback(
     (n: number) => {
       const next = Math.min(Math.max(0, n), total);
       setDir(next >= page ? "next" : "prev");
-      setPage(next);
+      setAt(next === 0 ? "cover" : keys[next - 1]);
       setTarget(null);
       setPick(null);
       window.scrollTo({ top: 0 });
     },
-    [page, total],
+    [page, total, keys],
   );
 
   useEffect(() => {
-    save(`page:${notebookId}`, String(page));
-    if (page > 0) {
+    save(`page:${notebookId}`, at);
+    if (entry?.kind === "topic") {
+      const k = readKey(entry.page);
       setRead((prev) => {
-        if (prev.has(page)) return prev;
-        const next = new Set(prev).add(page);
+        if (prev.has(k)) return prev;
+        const next = new Set(prev).add(k);
         save(`read:${notebookId}`, JSON.stringify([...next]));
         return next;
       });
     }
-  }, [page, notebookId]);
+  }, [at, entry, notebookId]);
 
   const setViewMode = (m: Mode) => {
     setMode(m);
@@ -143,10 +188,15 @@ export function Reader({
 
   // Images: only this page and the next one in book mode; everything when scrolling or printing.
   useEffect(() => {
-    if (showAll) return void request(assetPaths(md));
-    const cur = page > 0 ? book.pages[page - 1] : null;
-    request([...assetPaths(cur ? cur.body : book.intro), ...assetPaths(book.pages[page]?.body ?? "")]);
-  }, [showAll, md, page, book, request]);
+    const assets = (e: Entry | undefined) => {
+      if (!e) return [];
+      const c = book.chapters[e.chapterIdx];
+      const text = e.kind === "topic" ? e.page.body : (c.book?.intro ?? "");
+      return assetPaths(text).map((p) => `${c.slug}/${p}`);
+    };
+    if (showAll) return void request(entries.flatMap((e) => assets(e)));
+    request([...assets(entries[page - 1]), ...assets(entries[page])]);
+  }, [showAll, entries, page, book, request]);
 
   // Arrow keys turn pages (not while typing, or while a dialog such as Explain is open).
   useEffect(() => {
@@ -175,18 +225,18 @@ export function Reader({
   }, [printing]);
 
   const imageHandlers = useCallback(
-    (section: number): ImageHandlers => ({
-      resolve: (src) => urls[src],
+    (p: LibPage): ImageHandlers => ({
+      resolve: (src) => urls[`${p.slug}/${src}`],
       onZoom: (url, alt) => setZoom({ url, alt }),
       onExplain: (src) => {
-        const el = container.current?.querySelector(`img[src="${CSS.escape(urls[src] ?? "")}"]`);
+        const el = container.current?.querySelector(`img[src="${CSS.escape(urls[`${p.slug}/${src}`] ?? "")}"]`);
         const r = el?.getBoundingClientRect();
-        setTarget({ section, image: src, label: "This figure", rect: r && { x: r.x, y: r.y, w: r.width, h: Math.min(r.height, 80) } });
+        setTarget({ chapterId: p.chapterId, section: p.index, image: src, label: "This figure", rect: r && { x: r.x, y: r.y, w: r.width, h: Math.min(r.height, 80) } });
       },
     }),
     [urls],
   );
-  const plainImages = useMemo<ImageHandlers>(() => ({ resolve: (s) => urls[s], onZoom: (url, alt) => setZoom({ url, alt }) }), [urls]);
+  const plainImages = useCallback((slug: string): ImageHandlers => ({ resolve: (s) => urls[`${slug}/${s}`], onZoom: (url, alt) => setZoom({ url, alt }) }), [urls]);
 
   // text selection -> floating Explain button
   useEffect(() => {
@@ -196,10 +246,10 @@ export function Reader({
         const text = sel?.toString().trim() ?? "";
         if (!sel || sel.rangeCount === 0 || text.length < 3 || text.length > 1500) return setPick(null);
         const node = sel.anchorNode instanceof Element ? sel.anchorNode : sel.anchorNode?.parentElement;
-        const sec = node?.closest<HTMLElement>("[data-section]");
+        const sec = node?.closest<HTMLElement>("[data-section][data-chapter]");
         if (!sec || !container.current?.contains(sec)) return setPick(null);
         const r = sel.getRangeAt(0).getBoundingClientRect();
-        setPick({ section: Number(sec.dataset.section), selection: text, rect: { x: r.x, y: r.y, w: r.width, h: r.height } });
+        setPick({ chapterId: sec.dataset.chapter!, section: Number(sec.dataset.section), selection: text, rect: { x: r.x, y: r.y, w: r.width, h: r.height } });
       }, 0);
     };
     const onScroll = () => setPick(null);
@@ -214,31 +264,69 @@ export function Reader({
   }, []);
 
   const download = () => {
-    const blob = new Blob([md], { type: "text/markdown" });
+    const blob = new Blob([composeMarkdown(notebookTitle, book)], { type: "text/markdown" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `${book.title.replace(/[^\w -]+/g, "").trim() || "notes"} - ${LEVEL_NAMES[level] ?? level}.md`;
+    a.download = `${notebookTitle.replace(/[^\w -]+/g, "").trim() || "notes"} - ${LEVEL_NAMES[level] ?? level}.md`;
     a.click();
     URL.revokeObjectURL(a.href);
   };
 
-  const explainSlide = (section: number, sid: string, rect?: ExplainTarget["rect"]) =>
-    setTarget({ section, image: `slide:${sid}`, label: `Slide ${sid}: ${slides?.[sid]?.title ?? ""}`, rect });
-  const chip = (p: BookPage) =>
-    slides && p.slides.length > 0 ? (
-      <SlidesChip spec={p.spec} ids={p.slides} slides={slides} urls={urls} request={request} onExplain={(sid, rect) => explainSlide(p.index, sid, rect)} />
-    ) : null;
+  const explainSlide = (p: LibPage, sid: string, rect?: ExplainTarget["rect"]) =>
+    setTarget({ chapterId: p.chapterId, section: p.index, image: `slide:${sid}`, label: `Slide ${sid}: ${slides[p.slug]?.[sid]?.title ?? ""}`, rect });
+
+  // ----- notes: the open topic in book mode, or the topic whose Notes button was pressed when scrolling -----
+  const noteTarget = (p: LibPage): NoteTarget => ({ chapterId: p.chapterId, section: p.index, chapterTitle: book.chapters[p.chapterIdx].title, title: p.title });
+  const currentTopic = entry?.kind === "topic" ? entry.page : null;
+  const activeNote: NoteTarget | null = showAll ? scrollNote : currentTopic ? noteTarget(currentTopic) : null;
+  const notesVisible = notesOpen && !!activeNote && !printing;
+
+  const tools = (p: LibPage) => {
+    const slideIndex = slides[p.slug];
+    const hasNote = !!notes.notes[sectionKey(p.chapterId, p.index)];
+    return (
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        {slideIndex && p.slides.length > 0 && (
+          <SlidesChip spec={p.spec} ids={p.slides} slides={slideIndex} slug={p.slug} urls={urls} request={request} onExplain={(sid, rect) => explainSlide(p, sid, rect)} />
+        )}
+        <SectionLevelMenu level={p.level} busy={rewriting === sectionKey(p.chapterId, p.index)} disabled={!!rewriting} onChoose={(l) => onChoose(p.chapterId, p.index, l)} />
+        <button
+          onClick={() => {
+            if (showAll) {
+              setScrollNote(noteTarget(p));
+              setNotesOpen(true);
+            } else setNotesOpen((o) => !o);
+          }}
+          aria-pressed={notesVisible && activeNote?.chapterId === p.chapterId && activeNote.section === p.index}
+          title="Write notes on this topic"
+          className={cn(
+            "relative inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 font-sans text-[11.5px] font-medium shadow-card transition",
+            hasNote ? "border-accent/50 bg-accent-soft text-accent-text" : "border-border bg-surface text-muted hover:text-text",
+          )}
+        >
+          <NotebookPen className="size-3.5" /> Notes
+        </button>
+      </div>
+    );
+  };
 
   const levelName = LEVEL_NAMES[level] ?? level;
-  const progress = hasPages ? (showAll ? 0 : page / total) : 0;
+  const progress = hasPages && !showAll ? page / total : 0;
+  const position = !hasPages
+    ? ""
+    : showAll
+      ? `· ${book.minutes} min read`
+      : !entry
+        ? "· Cover"
+        : entry.kind === "chapter"
+          ? `· Chapter ${entry.chapterIdx + 1} of ${book.chapters.length}`
+          : `· ${book.chapters[entry.chapterIdx].title}`;
 
   return (
     <div ref={container} className="relative">
       <div className="no-print sticky top-14 z-20 -mx-4 mb-8 flex items-center gap-2 border-b border-border bg-bg/90 px-4 py-2 backdrop-blur sm:-mx-6 sm:px-6">
         <span className="text-[13px] font-semibold whitespace-nowrap">{levelName}</span>
-        <span className="truncate text-[12.5px] text-faint max-sm:hidden">
-          {hasPages && !showAll ? (page === 0 ? "· Cover" : `· Topic ${page} of ${total}`) : `· ${book.minutes} min read`}
-        </span>
+        <span className="truncate text-[12.5px] text-faint max-sm:hidden">{position}</span>
         <div className="ml-auto flex items-center gap-1">
           {hasPages && (
             <div role="group" aria-label="Reading view" className="mr-1 flex rounded-lg bg-surface-2 p-0.5">
@@ -258,6 +346,19 @@ export function Reader({
               ))}
             </div>
           )}
+          {hasPages && !showAll && (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={!currentTopic}
+              aria-pressed={notesVisible}
+              onClick={() => setNotesOpen((o) => !o)}
+              title={currentTopic ? "My notes on this topic" : "Open a topic to take notes"}
+              className={cn(notesVisible && "bg-accent-soft text-accent-text")}
+            >
+              <NotebookPen className="size-4" /> <span className="max-sm:hidden">Notes</span>
+            </Button>
+          )}
           {hasPages && (
             <Popover.Root>
               <Popover.Trigger asChild>
@@ -275,22 +376,31 @@ export function Reader({
                       <BookOpen className="size-3.5 shrink-0" /> Cover &amp; overview
                     </button>
                   </Popover.Close>
-                  {book.pages.map((p) => (
-                    <Popover.Close asChild key={p.index}>
-                      <button
-                        onClick={() => {
-                          if (mode === "book") go(p.number);
-                          else document.getElementById(`topic-${p.number}`)?.scrollIntoView({ behavior: "smooth" });
-                        }}
-                        className={cn("flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] hover:bg-surface-2", !showAll && page === p.number && "bg-accent-soft text-accent-text")}
-                      >
-                        <span className={cn("grid size-5 shrink-0 place-items-center rounded-md text-[11px] font-semibold tabular-nums", read.has(p.number) ? "bg-success-soft text-success" : "bg-surface-2 text-muted")}>
-                          {read.has(p.number) ? <Check className="size-3" /> : p.number}
-                        </span>
-                        <span className="min-w-0 flex-1 truncate">{p.title}</span>
-                      </button>
-                    </Popover.Close>
-                  ))}
+                  {entries.map((e, i) => {
+                    const n = i + 1;
+                    const c = book.chapters[e.chapterIdx];
+                    const open = () => {
+                      if (mode === "book") go(n);
+                      else document.getElementById(e.kind === "chapter" ? `chapter-${c.slug}` : `topic-${e.page.slug}-${e.page.index}`)?.scrollIntoView({ behavior: "smooth" });
+                    };
+                    return (
+                      <Popover.Close asChild key={keys[i]}>
+                        {e.kind === "chapter" ? (
+                          <button onClick={open} className={cn("mt-1 flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[12.5px] font-semibold tracking-tight hover:bg-surface-2", !showAll && page === n && "bg-accent-soft text-accent-text")}>
+                            <span className="min-w-0 flex-1 truncate">{c.title}</span>
+                            <ChapterPill chapter={c} />
+                          </button>
+                        ) : (
+                          <button onClick={open} className={cn("flex w-full items-center gap-2.5 rounded-lg py-1.5 pr-2.5 pl-4 text-left text-[13px] hover:bg-surface-2", !showAll && page === n && "bg-accent-soft text-accent-text")}>
+                            <span className={cn("grid size-5 shrink-0 place-items-center rounded-md text-[11px] font-semibold tabular-nums", read.has(readKey(e.page)) ? "bg-success-soft text-success" : "bg-surface-2 text-muted")}>
+                              {read.has(readKey(e.page)) ? <Check className="size-3" /> : e.page.number}
+                            </span>
+                            <span className="min-w-0 flex-1 truncate">{e.page.title}</span>
+                          </button>
+                        )}
+                      </Popover.Close>
+                    );
+                  })}
                 </Popover.Content>
               </Popover.Portal>
             </Popover.Root>
@@ -309,45 +419,84 @@ export function Reader({
         )}
       </div>
 
-      <div className="grid w-full gap-x-8 lg:grid-cols-[220px_minmax(0,1fr)] xl:grid-cols-[220px_minmax(0,1fr)_200px]">
+      <div className={cn("grid w-full gap-x-8 lg:grid-cols-[220px_minmax(0,1fr)]", notesVisible ? "xl:grid-cols-[220px_minmax(0,1fr)_300px]" : "xl:grid-cols-[220px_minmax(0,1fr)_200px]")}>
         <DocsNav
           book={book}
-          current={showAll ? -1 : page}
+          page={showAll ? -1 : page}
           read={read}
+          notes={notes.notes}
           onOpen={(n) => {
             if (mode === "book") go(n);
             else if (n === 0) window.scrollTo({ top: 0, behavior: "smooth" });
-            else document.getElementById(`topic-${n}`)?.scrollIntoView({ behavior: "smooth" });
+            else {
+              const e = entries[n - 1];
+              document.getElementById(e.kind === "chapter" ? `chapter-${book.chapters[e.chapterIdx].slug}` : `topic-${e.page.slug}-${e.page.index}`)?.scrollIntoView({ behavior: "smooth" });
+            }
           }}
         />
         <div className="mx-auto w-full min-w-0 max-w-[44rem]">
-      {showAll ? (
-        <article className="max-w-[44rem] pb-32">
-          <Markdown images={plainImages}>{[`# ${book.title}`, book.intro].filter(Boolean).join("\n\n")}</Markdown>
-          {book.pages.map((p) => (
-            <section key={p.index} id={`topic-${p.number}`} data-section={p.index} className={cn("scroll-mt-28", p.number > 1 && "print:break-before-page")}>
-              <div className="no-print flex justify-end pt-8 pb-1">{chip(p)}</div>
-              <Markdown images={imageHandlers(p.index)}>{`## ${p.title}\n\n${p.body}`}</Markdown>
-            </section>
-          ))}
-        </article>
-      ) : page === 0 ? (
-        <Cover book={book} levelName={levelName} read={read} dir={dir} images={plainImages} onOpen={go} />
-      ) : (
-        <TopicPage
-          key={page}
-          page={book.pages[page - 1]}
-          total={total}
-          prev={page > 1 ? book.pages[page - 2] : null}
-          next={page < total ? book.pages[page] : null}
-          dir={dir}
-          images={imageHandlers(book.pages[page - 1].index)}
-          chip={chip(book.pages[page - 1])}
-          onGo={go}
-        />
-      )}
+          {showAll ? (
+            <article className="max-w-[44rem] pb-32">
+              <h1 className="font-sans text-[2.1rem] leading-[1.12] font-semibold tracking-[-0.03em] text-balance">{notebookTitle}</h1>
+              {book.chapters.map((c, ci) => (
+                <div key={c.id}>
+                  <section id={`chapter-${c.slug}`} className={cn("scroll-mt-28 pt-12", ci > 0 && "print:break-before-page")}>
+                    <p className="eyebrow">Chapter {ci + 1}</p>
+                    <h2 className="mt-2 mb-4 font-sans text-[1.6rem] font-semibold tracking-tight">{c.title}</h2>
+                    {c.book ? (
+                      c.book.intro && <Markdown images={plainImages(c.slug)}>{c.book.intro}</Markdown>
+                    ) : (
+                      <Placeholder chapter={c} onGenerate={onGenerate} />
+                    )}
+                  </section>
+                  {c.pages.map((p) => (
+                    <section key={p.index} id={`topic-${p.slug}-${p.index}`} data-section={p.index} data-chapter={p.chapterId} className="scroll-mt-28">
+                      <div className="no-print flex justify-end pt-8 pb-1">{tools(p)}</div>
+                      <Markdown images={imageHandlers(p)}>{`### ${p.title}\n\n${p.body}`}</Markdown>
+                    </section>
+                  ))}
+                </div>
+              ))}
+            </article>
+          ) : !entry ? (
+            <Cover book={book} title={notebookTitle} levelName={levelName} read={read} onOpen={go} onGenerate={onGenerate} />
+          ) : entry.kind === "chapter" ? (
+            <ChapterCover
+              key={at}
+              chapter={book.chapters[entry.chapterIdx]}
+              index={entry.chapterIdx}
+              count={book.chapters.length}
+              book={book}
+              read={read}
+              images={plainImages(book.chapters[entry.chapterIdx].slug)}
+              onOpen={go}
+              onGenerate={onGenerate}
+            />
+          ) : (
+            <TopicPage
+              key={at}
+              page={entry.page}
+              chapter={book.chapters[entry.chapterIdx]}
+              count={book.chapters[entry.chapterIdx].pages.length}
+              prev={page > 1 ? entries[page - 2] : null}
+              next={page < total ? entries[page] : null}
+              book={book}
+              images={imageHandlers(entry.page)}
+              tools={tools(entry.page)}
+              onGo={go}
+              dir={dir}
+            />
+          )}
         </div>
-        {!showAll && page > 0 ? <OnThisPage root={container} depKey={page} /> : <div className="max-xl:hidden" />}
+        {notesVisible && activeNote ? (
+          <div className="no-print max-xl:fixed max-xl:inset-x-3 max-xl:bottom-3 max-xl:z-40 xl:sticky xl:top-[112px] xl:h-[calc(100dvh-136px)] xl:self-start">
+            <NotesPanel notebookId={notebookId} target={activeNote} api={notes} onClose={() => setNotesOpen(false)} />
+          </div>
+        ) : !showAll && entry?.kind === "topic" ? (
+          <OnThisPage root={container} depKey={at} />
+        ) : (
+          <div className="max-xl:hidden" />
+        )}
       </div>
 
       {pick && !target && (
@@ -387,96 +536,185 @@ export function Reader({
   );
 }
 
-function Cover({
-  book,
-  levelName,
-  read,
-  dir,
-  images,
-  onOpen,
-}: {
-  book: ReturnType<typeof parseBook>;
-  levelName: string;
-  read: Set<number>;
-  dir: "next" | "prev";
-  images: ImageHandlers;
-  onOpen: (n: number) => void;
-}) {
+/** Where a chapter is in its life: shown next to its title in the contents and navigation. */
+function ChapterPill({ chapter }: { chapter: LibChapter }) {
+  if (chapter.book) return null;
+  if (chapter.status === "generating")
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1 text-[11px] font-medium text-accent-text">
+        <Loader2 className="size-3 animate-spin" /> Writing
+      </span>
+    );
+  if (chapter.status === "failed")
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1 text-[11px] font-medium text-danger">
+        <AlertTriangle className="size-3" /> Failed
+      </span>
+    );
+  return <span className="shrink-0 text-[11px] font-medium text-faint">Waiting</span>;
+}
+
+/** What a chapter without a doc at this level shows instead of its topics. */
+function Placeholder({ chapter, onGenerate }: { chapter: LibChapter; onGenerate: () => void }) {
+  const failed = chapter.status === "failed";
+  const writing = chapter.status === "generating";
+  return (
+    <div className={cn("rounded-xl border p-5", failed ? "border-danger/30 bg-danger-soft" : "border-border bg-surface")}>
+      <div className={cn("flex items-center gap-2 text-[14px] font-semibold", failed && "text-danger")}>
+        {writing ? <Loader2 className="size-4 animate-spin text-accent" /> : failed ? <AlertTriangle className="size-4" /> : null}
+        {writing ? "Writing this chapter now" : failed ? "This chapter failed" : "Not written at this level yet"}
+      </div>
+      <p className="mt-1.5 text-[13px] text-muted">
+        {writing
+          ? "Every slide is read first, then the topics appear here as soon as they are written. You can read the other chapters meanwhile."
+          : failed
+            ? (chapter.error ?? "Something went wrong while writing it.")
+            : "It will be written when the generator picks it up."}
+      </p>
+      {!writing && (
+        <Button size="sm" variant="secondary" className="mt-3" onClick={onGenerate}>
+          {failed ? "Try again" : "Write it now"}
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function TopicList({ chapter, book, read, onOpen }: { chapter: LibChapter; book: LibraryBook; read: Set<string>; onOpen: (n: number) => void }) {
+  return (
+    <ol className="overflow-hidden rounded-xl border border-border">
+      {chapter.pages.map((p) => (
+        <li key={p.index} className="border-b border-border last:border-0">
+          <button onClick={() => onOpen(pageNumber(book, p.chapterIdx, p.index))} className="group flex w-full items-center gap-3.5 px-4 py-3 text-left transition-colors hover:bg-surface sm:px-5">
+            <span className={cn("grid size-7 shrink-0 place-items-center rounded-lg text-[12px] font-semibold tabular-nums", read.has(readKey(p)) ? "bg-success-soft text-success" : "bg-surface-2 text-muted group-hover:bg-accent-soft group-hover:text-accent-text")}>
+              {read.has(readKey(p)) ? <Check className="size-3.5" /> : p.number}
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[14.5px] font-medium tracking-tight">{p.title}</span>
+              <span className="block text-[12px] text-faint">
+                Slides {p.spec.replace(/-/g, "–")} · {p.minutes} min{p.level ? " · rewritten" : ""}
+              </span>
+            </span>
+            <ChevronRight className="size-4 shrink-0 text-faint transition-transform group-hover:translate-x-0.5 group-hover:text-text" />
+          </button>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function Cover({ book, title, levelName, read, onOpen, onGenerate }: { book: LibraryBook; title: string; levelName: string; read: Set<string>; onOpen: (n: number) => void; onGenerate: () => void }) {
+  const ready = book.chapters.filter((c) => c.book).length;
   const meta = [
-    `${book.pages.length} topic${book.pages.length === 1 ? "" : "s"}`,
-    `${book.slideCount} slide${book.slideCount === 1 ? "" : "s"}`,
-    book.decks.length > 1 ? `${book.decks.length} PDFs` : null,
-    `${book.minutes} min read`,
+    `${book.chapters.length} chapter${book.chapters.length === 1 ? "" : "s"}`,
+    `${book.topics} topic${book.topics === 1 ? "" : "s"}`,
+    book.slideCount ? `${book.slideCount} slide${book.slideCount === 1 ? "" : "s"}` : null,
+    book.minutes ? `${book.minutes} min read` : null,
   ].filter(Boolean);
-  const firstUnread = book.pages.find((p) => !read.has(p.number))?.number ?? 1;
-  const started = read.size > 0;
+  const topics = book.entries.flatMap((e, i) => (e.kind === "topic" ? [{ n: i + 1, p: e.page }] : []));
+  const firstUnread = topics.find((t) => !read.has(readKey(t.p)))?.n ?? topics[0]?.n ?? (book.entries.length ? 1 : 0);
+  const started = topics.some((t) => read.has(readKey(t.p)));
   return (
     <div className="max-w-[44rem] pb-24">
-      <div>
-        <div className="pb-4">
-          <p className="eyebrow">{levelName}</p>
-          <h1 className="mt-3 font-sans text-[2.1rem] leading-[1.12] font-semibold tracking-[-0.03em] text-balance sm:text-[2.5rem]">{book.title}</h1>
-          <p className="mt-4 text-[13.5px] text-muted">{meta.join(" · ")}</p>
-          {book.decks.length > 0 && (
-            <p className="mt-1 line-clamp-2 text-[12.5px] text-faint">From {book.decks.join(" · ")}</p>
-          )}
-          {book.intro && <Markdown images={images} className="mt-8">{book.intro}</Markdown>}
-          <Button variant="primary" className="mt-8" onClick={() => onOpen(started ? firstUnread : 1)}>
-            {started ? "Continue reading" : "Start reading"} <ArrowRight className="size-4" />
-          </Button>
-        </div>
-      </div>
+      <p className="eyebrow">{levelName}</p>
+      <h1 className="mt-3 font-sans text-[2.1rem] leading-[1.12] font-semibold tracking-[-0.03em] text-balance sm:text-[2.5rem]">{title}</h1>
+      <p className="mt-4 text-[13.5px] text-muted">{meta.join(" · ")}</p>
+      {ready < book.chapters.length && (
+        <p className="mt-1 flex items-center gap-1.5 text-[12.5px] text-faint">
+          {book.chapters.some((c) => c.status === "generating") && <Loader2 className="size-3 animate-spin" />}
+          {ready} of {book.chapters.length} chapters ready. The rest appear here as they are written.
+        </p>
+      )}
+      {firstUnread > 0 && (
+        <Button variant="primary" className="mt-8" onClick={() => onOpen(firstUnread)}>
+          {started ? "Continue reading" : "Start reading"} <ArrowRight className="size-4" />
+        </Button>
+      )}
 
       <h2 className="eyebrow mt-12 mb-3">Contents</h2>
-      <ol className="overflow-hidden rounded-xl border border-border">
-        {book.pages.map((p) => (
-          <li key={p.index} className="border-b border-border last:border-0">
-            <button onClick={() => onOpen(p.number)} className="group flex w-full items-center gap-3.5 px-4 py-3 text-left transition-colors hover:bg-surface sm:px-5">
-              <span className={cn("grid size-7 shrink-0 place-items-center rounded-lg text-[12px] font-semibold tabular-nums", read.has(p.number) ? "bg-success-soft text-success" : "bg-surface-2 text-muted group-hover:bg-accent-soft group-hover:text-accent-text")}>
-                {read.has(p.number) ? <Check className="size-3.5" /> : p.number}
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-[14.5px] font-medium tracking-tight">{p.title}</span>
-                <span className="block text-[12px] text-faint">
-                  Slides {p.spec.replace(/-/g, "–")} · {p.minutes} min
-                </span>
-              </span>
-              <ChevronRight className="size-4 shrink-0 text-faint transition-transform group-hover:translate-x-0.5 group-hover:text-text" />
+      <div className="space-y-6">
+        {book.chapters.map((c, ci) => (
+          <section key={c.id}>
+            <button onClick={() => onOpen(pageNumber(book, ci))} className="mb-2 flex w-full items-center gap-2 text-left">
+              <span className="text-[11.5px] font-semibold tracking-wider text-faint uppercase">Chapter {ci + 1}</span>
+              <span className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-tight hover:underline">{c.title}</span>
+              <ChapterPill chapter={c} />
             </button>
-          </li>
+            {c.book ? <TopicList chapter={c} book={book} read={read} onOpen={onOpen} /> : <Placeholder chapter={c} onGenerate={onGenerate} />}
+          </section>
         ))}
-      </ol>
+      </div>
+    </div>
+  );
+}
+
+function ChapterCover({ chapter, index, count, book, read, images, onOpen, onGenerate }: { chapter: LibChapter; index: number; count: number; book: LibraryBook; read: Set<string>; images: ImageHandlers; onOpen: (n: number) => void; onGenerate: () => void }) {
+  const first = chapter.pages.find((p) => !read.has(readKey(p))) ?? chapter.pages[0];
+  const doc = chapter.book;
+  const meta = doc
+    ? [`${chapter.pages.length} topic${chapter.pages.length === 1 ? "" : "s"}`, `${doc.slideCount} slides`, `${chapter.pages.reduce((n, p) => n + p.minutes, 0)} min read`]
+    : [];
+  return (
+    <div className="max-w-[44rem] pb-24">
+      <p className="eyebrow">
+        Chapter {index + 1} <span className="opacity-70">of {count}</span>
+      </p>
+      <h1 className="mt-3 font-sans text-[2.1rem] leading-[1.12] font-semibold tracking-[-0.03em] text-balance sm:text-[2.5rem]">{chapter.title}</h1>
+      {doc ? (
+        <>
+          <p className="mt-4 text-[13.5px] text-muted">{meta.join(" · ")}</p>
+          {doc.decks.length > 0 && <p className="mt-1 line-clamp-2 text-[12.5px] text-faint">From {doc.decks.join(" · ")}</p>}
+          {doc.intro && <Markdown images={images} className="mt-8">{doc.intro}</Markdown>}
+          {first && (
+            <Button variant="primary" className="mt-8" onClick={() => onOpen(pageNumber(book, index, first.index))}>
+              Start this chapter <ArrowRight className="size-4" />
+            </Button>
+          )}
+          <h2 className="eyebrow mt-12 mb-3">Topics</h2>
+          <TopicList chapter={chapter} book={book} read={read} onOpen={onOpen} />
+        </>
+      ) : (
+        <div className="mt-8">
+          <Placeholder chapter={chapter} onGenerate={onGenerate} />
+        </div>
+      )}
     </div>
   );
 }
 
 function TopicPage({
   page,
-  total,
+  chapter,
+  count,
   prev,
   next,
+  book,
   dir,
   images,
-  chip,
+  tools,
   onGo,
 }: {
-  page: BookPage;
-  total: number;
-  prev: BookPage | null;
-  next: BookPage | null;
+  page: LibPage;
+  chapter: LibChapter;
+  count: number;
+  prev: Entry | null;
+  next: Entry | null;
+  book: LibraryBook;
   dir: "next" | "prev";
   images: ImageHandlers;
-  chip: React.ReactNode;
+  tools: React.ReactNode;
   onGo: (n: number) => void;
 }) {
+  const label = (e: Entry | null) => (!e ? null : e.kind === "chapter" ? `Chapter: ${book.chapters[e.chapterIdx].title}` : e.page.title);
+  const n = book.entries.findIndex((e) => e.kind === "topic" && e.page.chapterId === page.chapterId && e.page.index === page.index) + 1;
   return (
-    <div className="book-page max-w-[44rem] pb-24">
-      <article data-section={page.index}>
-        <div className="flex items-center justify-between gap-3">
-          <p className="eyebrow">
-            Topic {page.number} <span className="opacity-70">of {total}</span> · {page.minutes} min read
+    <div className="book-page max-w-[44rem] pb-24" data-dir={dir}>
+      <article data-section={page.index} data-chapter={page.chapterId}>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="eyebrow min-w-0 truncate">
+            {chapter.title} · Topic {page.number} <span className="opacity-70">of {count}</span> · {page.minutes} min read
           </p>
-          <div className="no-print">{chip}</div>
+          <div className="no-print">{tools}</div>
         </div>
         <h1 className="mt-3 font-sans text-[1.9rem] leading-[1.15] font-semibold tracking-[-0.03em] text-balance sm:text-[2.25rem]">{page.title}</h1>
         <div className="my-8" />
@@ -484,23 +722,17 @@ function TopicPage({
       </article>
 
       <nav className="no-print mt-16 grid grid-cols-2 gap-3 border-t border-border pt-8" aria-label="Page navigation">
-        <button
-          onClick={() => onGo(prev ? prev.number : 0)}
-          className="group flex flex-col items-start rounded-lg border border-border px-4 py-3.5 text-left transition-colors hover:border-accent/60"
-        >
+        <button onClick={() => onGo(prev ? n - 1 : 0)} className="group flex flex-col items-start rounded-lg border border-border px-4 py-3.5 text-left transition-colors hover:border-accent/60">
           <span className="flex items-center gap-1.5 text-[11.5px] font-medium text-faint">
-            <ArrowLeft className="size-3.5 transition-transform group-hover:-translate-x-0.5" /> {prev ? "Previous topic" : "Overview"}
+            <ArrowLeft className="size-3.5 transition-transform group-hover:-translate-x-0.5" /> {prev ? "Previous" : "Overview"}
           </span>
-          <span className="mt-1 line-clamp-2 text-[14.5px] font-medium tracking-tight text-accent-text">{prev ? prev.title : "Back to contents"}</span>
+          <span className="mt-1 line-clamp-2 text-[14.5px] font-medium tracking-tight text-accent-text">{label(prev) ?? "Back to contents"}</span>
         </button>
-        <button
-          onClick={() => onGo(next ? next.number : 0)}
-          className="group flex flex-col items-end rounded-lg border border-border px-4 py-3.5 text-right transition-colors hover:border-accent/60"
-        >
+        <button onClick={() => onGo(next ? n + 1 : 0)} className="group flex flex-col items-end rounded-lg border border-border px-4 py-3.5 text-right transition-colors hover:border-accent/60">
           <span className="flex items-center gap-1.5 text-[11.5px] font-medium text-faint">
-            {next ? "Next topic" : "Finished"} <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />
+            {next ? "Next" : "Finished"} <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />
           </span>
-          <span className="mt-1 line-clamp-2 text-[14.5px] font-medium tracking-tight text-accent-text">{next ? next.title : "Back to contents"}</span>
+          <span className="mt-1 line-clamp-2 text-[14.5px] font-medium tracking-tight text-accent-text">{label(next) ?? "Back to contents"}</span>
         </button>
       </nav>
       <p className="no-print mt-4 text-center text-[12px] text-faint max-sm:hidden">Use ← → to turn pages</p>
@@ -512,6 +744,7 @@ function SlidesChip({
   spec,
   ids,
   slides,
+  slug,
   urls,
   request,
   onExplain,
@@ -519,6 +752,7 @@ function SlidesChip({
   spec: string;
   ids: string[];
   slides: SlideIndex;
+  slug: string;
   urls: Record<string, string>;
   request: (paths: string[]) => void;
   onExplain: (sid: string, rect?: ExplainTarget["rect"]) => void;
@@ -526,7 +760,7 @@ function SlidesChip({
   const shown = ids.filter((sid) => slides[sid]);
   if (!shown.length) return null;
   return (
-    <Popover.Root onOpenChange={(open) => open && request(shown.map((sid) => slides[sid].image))}>
+    <Popover.Root onOpenChange={(open) => open && request(shown.map((sid) => `${slug}/${slides[sid].image}`))}>
       <Popover.Trigger asChild>
         <button className="inline-flex h-7 items-center gap-1.5 rounded-full border border-border bg-surface px-2.5 font-sans text-[11.5px] font-medium text-muted shadow-card transition hover:text-text">
           <GalleryHorizontalEnd className="size-3.5" /> Slides {spec.replace(/-/g, "–")}
@@ -542,7 +776,7 @@ function SlidesChip({
           <p className="mb-2 px-1 text-[12px] font-medium text-muted">Source slides</p>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             {shown.map((sid) => {
-              const url = urls[slides[sid].image];
+              const url = urls[`${slug}/${slides[sid].image}`];
               return (
                 <figure key={sid} className="group/slide overflow-hidden rounded-xl border border-border bg-surface-2">
                   {url ? (
@@ -577,40 +811,68 @@ function SlidesChip({
   );
 }
 
-function DocsNav({ book, current, read, onOpen }: { book: ReturnType<typeof parseBook>; current: number; read: Set<number>; onOpen: (n: number) => void }) {
-  const [open, setOpen] = useState(true);
-  if (!book.pages.length) return <div className="max-lg:hidden" />;
+function DocsNav({ book, page, read, notes, onOpen }: { book: LibraryBook; page: number; read: Set<string>; notes: NotesApi["notes"]; onOpen: (n: number) => void }) {
+  const currentChapter = page > 0 ? book.entries[page - 1]?.chapterIdx : undefined;
+  const [open, setOpen] = useState<Set<number>>(() => new Set(book.chapters.length <= 3 ? book.chapters.map((_, i) => i) : [currentChapter ?? 0]));
+  useEffect(() => {
+    if (currentChapter === undefined) return;
+    setOpen((o) => (o.has(currentChapter) ? o : new Set(o).add(currentChapter)));
+  }, [currentChapter]);
+  if (!book.entries.length) return <div className="max-lg:hidden" />;
   const item = (active: boolean) =>
     cn(
       "flex w-full items-start gap-2 rounded-md px-2.5 py-1.5 text-left text-[13.5px] leading-snug transition-colors",
       active ? "bg-surface-3 font-medium text-text" : "text-muted hover:bg-surface-2 hover:text-text",
     );
   return (
-    <nav aria-label="Topics" className="no-print sticky top-[112px] max-h-[calc(100dvh-128px)] self-start overflow-y-auto pb-8 max-lg:hidden">
-      <button onClick={() => onOpen(0)} className={item(current === 0)}>
+    <nav aria-label="Chapters and topics" className="no-print sticky top-[112px] max-h-[calc(100dvh-128px)] self-start overflow-y-auto pb-8 max-lg:hidden">
+      <button onClick={() => onOpen(0)} className={item(page === 0)}>
         <BookOpen className="mt-0.5 size-3.5 shrink-0" /> Overview
       </button>
-      <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="eyebrow mt-4 mb-1 flex w-full items-center gap-1 px-2.5 hover:text-muted">
-        <ChevronRight className={cn("size-3 transition-transform", open && "rotate-90")} /> Topics
-      </button>
-      {open && (
-        <ol className="ml-[17px] space-y-px border-l border-border pl-1.5">
-          {book.pages.map((p) => (
-            <li key={p.index}>
-              <button onClick={() => onOpen(p.number)} className={item(current === p.number)} aria-current={current === p.number ? "page" : undefined}>
-                <span className="line-clamp-2 flex-1">{p.title}</span>
-                {read.has(p.number) && <Check className="mt-0.5 size-3 shrink-0 text-success" />}
+      {book.chapters.map((c, ci) => {
+        const isOpen = open.has(ci);
+        const chapterPage = pageNumber(book, ci);
+        return (
+          <div key={c.id} className="mt-3">
+            <div className="flex items-center">
+              <button
+                aria-label={isOpen ? "Collapse chapter" : "Expand chapter"}
+                aria-expanded={isOpen}
+                onClick={() => setOpen((o) => { const n = new Set(o); if (n.has(ci)) n.delete(ci); else n.add(ci); return n; })}
+                className="grid size-6 shrink-0 place-items-center rounded text-faint hover:text-text"
+              >
+                <ChevronRight className={cn("size-3 transition-transform", isOpen && "rotate-90")} />
               </button>
-            </li>
-          ))}
-        </ol>
-      )}
+              <button onClick={() => onOpen(chapterPage)} className={cn(item(page === chapterPage), "min-w-0 flex-1 text-[13px] font-semibold")}>
+                <span className="line-clamp-2 flex-1">{c.title}</span>
+                <ChapterPill chapter={c} />
+              </button>
+            </div>
+            {isOpen && c.pages.length > 0 && (
+              <ol className="ml-[17px] space-y-px border-l border-border pl-1.5">
+                {c.pages.map((p) => {
+                  const n = pageNumber(book, ci, p.index);
+                  return (
+                    <li key={p.index}>
+                      <button onClick={() => onOpen(n)} className={item(page === n)} aria-current={page === n ? "page" : undefined}>
+                        <span className="line-clamp-2 flex-1">{p.title}</span>
+                        {notes[sectionKey(p.chapterId, p.index)] && <NotebookPen className="mt-0.5 size-3 shrink-0 text-accent" aria-label="Has notes" />}
+                        {read.has(readKey(p)) && <Check className="mt-0.5 size-3 shrink-0 text-success" />}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
+          </div>
+        );
+      })}
     </nav>
   );
 }
 
 /** "On this page": the open topic's headings, read from the rendered DOM, with scroll-spy. */
-function OnThisPage({ root, depKey }: { root: React.RefObject<HTMLDivElement | null>; depKey: number }) {
+function OnThisPage({ root, depKey }: { root: React.RefObject<HTMLDivElement | null>; depKey: string }) {
   const [heads, setHeads] = useState<{ id: string; text: string; level: number }[]>([]);
   const [active, setActive] = useState("");
   useEffect(() => {

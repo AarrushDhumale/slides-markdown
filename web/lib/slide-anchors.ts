@@ -30,6 +30,18 @@ export function splitDoc(md: string): { preamble: string; sections: DocSection[]
   return { preamble: preamble.trim(), sections };
 }
 
+/** The doc with section `idx` replaced by `body`; its anchor and the rule before the next section stay,
+ * so section indexes don't move (same as backend/pipeline/explain.py:replace_section). */
+export function replaceSection(md: string, idx: number, body: string): string {
+  const marks = [...md.matchAll(ANCHOR_RE)];
+  const mark = marks[idx];
+  if (!mark) throw new Error(`Section ${idx} not found (doc has ${marks.length})`);
+  const next = marks[idx + 1];
+  const start = (mark.index ?? 0) + mark[0].length;
+  const tail = next ? "\n\n---\n\n" : "\n";
+  return md.slice(0, start) + "\n" + body.trim() + tail + md.slice(next ? next.index : md.length);
+}
+
 /** `B·12` -> `B-012`, the worker's file id for slide images. */
 export function slideFileId(sid: string): string {
   const [letter, page] = sid.split(SEP);

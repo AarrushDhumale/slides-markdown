@@ -2,7 +2,7 @@
 
 Converts college lecture slide PDFs into readable Markdown study notes, using a self-hosted vision LLM. The user is a student. This file records the state of the project, the decisions behind it, and the traps already hit, so a new session can continue without re-learning them. `README.md` has the user-facing usage; keep both in sync when behaviour changes.
 
-**Git:** `main` includes the web app, hosted-model layer and topic book (merged Oct 2026). The docs-style frontend redesign is committed on branch `frontend-redesign` (not merged to `main` yet). Commit only when the user asks.
+**Git:** `main` includes the web app, hosted-model layer and topic book (merged Oct 2026). The docs-style frontend redesign is committed on branch `frontend-redesign` (not merged to `main` yet); the Oct 22 chapter-library / per-section-level / notes work sits **uncommitted** on that branch (see `docs/SESSION_LOG.md` section 13). Commit only when the user asks.
 
 **Resuming?** Read `docs/SESSION_LOG.md` first: current state, what was measured and decided, what is unverified, and the open work list.
 
@@ -14,6 +14,7 @@ cd /home/aarrush/personal/projects/slides_to_markdown
 .venv/bin/pytest -q          # offline tests (synthetic PDFs + fake LLM + in-memory Supabase, no GPU/network)
 .venv/bin/s2m usage          # API spend this month (data/usage.jsonl)
 .venv/bin/s2m worker         # web app worker (needs SUPABASE_URL / SUPABASE_SERVICE_KEY in .env)
+.venv/bin/s2m library        # which chapters/levels the web library already has (--missing)
 cd web && corepack pnpm@9.15.4 dev|build|typecheck|test   # Next.js app (no npm on this machine)
 ```
 - **Levels:** `proficient` (dense revision), `learner` (main doc), `donkey` (ELI5), `notes` (short lecture notes with key diagrams, condensed *from the learner doc*), `summary` (cram sheet, condensed *from the learner doc*), `all`. `dockey` is still accepted as an alias for `donkey`.
@@ -65,12 +66,22 @@ Caches of generated prose are keyed by the full prompt, the input and `llm.gener
   Cloud Run later). Vercel never runs the pipeline; the worker only makes outbound calls and *pulls* jobs.
 - **Auth:** anonymous Supabase users (no visible sign-in, user's choice for phase 1); RLS per owner. Writes that need checks
   (notebooks, uploads, jobs, explain) go through API routes with the service-role key; quotas in `web/lib/limits.ts`.
-- **One flat book per notebook (user's later instruction, Oct 2026):** the worker runs `convert_chapter(by_topic=True)`
-  (`s2m worker --layout topics`, the default): all PDFs merged, **no chapters**, sections by topic, shown as a book
-  (`web/lib/book.ts`, `web/components/reader.tsx`: cover + contents page, one page per topic, prev/next, ← →, scroll
-  toggle). `run.TOPIC_LAYOUT` = `topics.md` prompt, ~5 slides/section, ceiling 80 sections (chapter outlines cap at
-  12), and `outline.fallback_outline` (consecutive slides grouped, never across PDFs) if the outline call fails. This
-  supersedes "don't fragment into many small sections" **for the web app only**; the CLI default is still chapter-wise.
+- **One chapter per PDF, shared library (user's instruction, Oct 22 2026; supersedes the earlier "one flat book per notebook"):**
+  a notebook = its PDFs; each PDF is a *chapter* identified by the PDF's content hash (`chapters.sha`, computed in
+  `/api/sources` from the stored bytes, same as `ingest.file_sha`). Each chapter is a topic book (`convert_chapter(by_topic=True)`
+  on that one PDF, `run.TOPIC_LAYOUT`), generated once for everyone, published to the `library` bucket as `<slug>/…` (slug =
+  filename words + sha[:8]) and listed in `chapter_docs`. `/api/jobs` skips levels a chapter already has (`web/lib/library.ts`
+  `missingLevels` = `worker.missing_levels`; returns `{ready:true}` with no job). The worker publishes each chapter right after
+  it's written (`upload_chapter`), claims it with `claim_chapter`, and one failed chapter doesn't stop the rest. Topics are
+  **not** merged across PDFs any more. Reader: `web/lib/book.ts` `parseLibraryBook` (Cover → chapter cover → topics),
+  `web/components/reader.tsx`; place/read keys are `c:<slug>` / `t:<slug>:<i>` (page numbers shift as chapters arrive).
+  CLI default is still chapter-wise.
+- **Per-section level ("Enhance"):** `POST /api/sections/rewrite` (Vercel → OpenRouter DeepSeek, `REWRITE_MODEL`); prompts are
+  the Python writer's (`web/lib/write-prompts.generated.ts`, synced like explain; tests check). Result = `section_variants`
+  (shared per chapter/section/level) + `section_choices` (per notebook). Section index = i-th slide anchor, so the choice
+  never moves; `explain` splices the variant (`explain.replace_section` / `replaceSection`) so it explains what's on screen.
+  Not streamed (one JSON response). **Notes:** `user_notes` per (notebook, chapter, section), written straight from the
+  browser under RLS (`components/notes-panel.tsx`); demo mode keeps them in localStorage.
 - **Layout the user asked for:** two panes (sources + Studio action cards left, reader right); Summary is the default view;
   Learner / Revision (proficient) / Explain simply (donkey) / Quiz are buttons. Quiz = `quiz.json` parsed from the learner
   doc (`backend/pipeline/quiz.py`), no model call. Slide chips (from `<!-- slides … -->` anchors) open a popover.
@@ -79,8 +90,8 @@ Caches of generated prose are keyed by the full prompt, the input and `llm.gener
   Context is built server-side (`backend/pipeline/explain.py`, mirrored in `web/lib/explain-context.ts`); section index =
   i-th slide anchor on both sides. `web/lib/explain-prompt.generated.ts` must match `backend/prompts/explain.md`
   (a test checks; `pnpm sync-prompt`).
-- **Worker files:** `data/web/notebooks/<id>/{pdfs,chapter}`; uploads `outputs/<id>/{<level>.md, assets/, slides/*.webp,
-  slides.json, extracts.json, quiz.json}`. `convert_chapter` now also writes `extracts.json` + `slides.json` into the chapter dir.
+- **Worker files:** `data/web/notebooks/<id>/pdfs` and `data/web/library/<slug>/` (the chapter dir); uploads `library/<slug>/{<level>.md, assets/, slides/*.webp,
+  slides.json, extracts.json, quiz.json}` (the old per-notebook `outputs` bucket/`documents` table are no longer written; migration 003). `convert_chapter` now also writes `extracts.json` + `slides.json` into the chapter dir.
 
 ## Frontend look (Oct 2026, `frontend-redesign`)
 Docs-style dark reader (Vercel/Stripe/Clerk docs): flat, no gradients or heavy animation. Themes `docs` (dark) and `paper` (light) via `data-theme`; reading fonts `inter|atkinson|lora|literata|nunito` via `data-font`; both picked from the header palette icon and also settable with `?theme=` / `?font=`. Reader = topics nav | content | "On this page". **Demo without Supabase:** `/notebooks/demo?view=learner&p=1` (static files in `web/public/demo/`). Tabbed code needs fences with `tab="Label"`. Full detail and open work: `docs/SESSION_LOG.md` section 11.
@@ -135,10 +146,11 @@ Docs-style dark reader (Vercel/Stripe/Clerk docs): flat, no gradients or heavy a
 - Foreground `sleep` is blocked in this harness. Run long jobs with `run_in_background` and wait for the notification.
 - Big decks take 5–15 minutes. Most reruns are fast because readings and sections are cached.
 - Node here has no npm and no built-in TypeScript: use `corepack pnpm@9.15.4`, and `tsx` for web tests.
-- Supabase CLI isn't installed; a session can download it to its scratchpad (`supabase start` uses `supabase/config.toml`).
+- Supabase CLI isn't installed; a session can download it to its scratchpad (`supabase start` uses `supabase/config.toml`; `supabase db reset` applies migrations 001-003). The exact live-stack recipe, Playwright approach and traps are in `docs/SESSION_LOG.md` section 13 ("How to resume the web app").
+- Don't run `next build` while `next dev` is running (corrupts `.next`); to stop the dev server use `ps -eo pid,comm | awk '$2 ~ /^next/ {print $1}'`, not `pkill -f`.
 
 ## Known limitations / next steps
-- **Not built yet:** Google sign-in (link to the anonymous user), the Cloud Run worker image and durable cache mirroring
+- **Not built yet:** streaming for the section rewrite, a library browse/admin page, Explain verified live with `chapter_id`, Google sign-in (link to the anonymous user), the Cloud Run worker image and durable cache mirroring
   to Storage, a slide pane synced to scroll, "retry failed slides" (re-queueing the job does it: finished work is cached).
 - **Accuracy gaps:**
   - Slides that are raw listings (assembly, DWARF) still produce guessy explanations.

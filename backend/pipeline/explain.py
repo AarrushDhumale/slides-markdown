@@ -58,6 +58,17 @@ def split_sections(md: str) -> list[tuple[list[str], str]]:
     return out
 
 
+def replace_section(md: str, idx: int, body: str) -> str:
+    """The doc with section `idx` (after its `<!-- slides … -->` anchor) replaced by `body`; the anchor and
+    the rule before the next section stay, so section indexes don't move."""
+    marks = list(ANCHOR_RE.finditer(md))
+    if not 0 <= idx < len(marks):
+        raise ExplainError(f"section {idx} not found (doc has {len(marks)})")
+    end = marks[idx + 1].start() if idx + 1 < len(marks) else len(md)
+    tail = "\n\n---\n\n" if idx + 1 < len(marks) else "\n"
+    return md[:marks[idx].end()] + "\n" + body.strip() + tail + md[end:]
+
+
 def _slides_json(slide_ids: list[str], extracts: dict[str, dict]) -> str:
     rows = []
     for sid in slide_ids:

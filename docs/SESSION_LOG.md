@@ -1,4 +1,4 @@
-# Session log: web app, hosted models, topic book, model comparison, Notes level, past papers (Oct 2026)
+# Session log: web app, hosted models, topic book, model comparison, Notes level, past papers, chapter library (Oct 2026)
 
 A handoff for starting a fresh session without re-deriving any of this. Read in this order: **`CLAUDE.md`** (auto-loaded; working rules and traps) → this file (what happened, current state, what's open) → `docs/PROJECT_GUIDE.md` (architecture and why each framework) → `docs/MODEL_COMPARISON.md` (measured model results).
 
@@ -6,11 +6,11 @@ A handoff for starting a fresh session without re-deriving any of this. Read in 
 
 | | |
 |---|---|
-| Branch | **Session 3 (Oct 19-20): `main` now equals `web-app`** (merged and pushed). Work continues on branch **`frontend-redesign`** (created from `main`, not pushed). See section 11. |
+| Branch | **`frontend-redesign`** (from `main`; `main` equals `web-app`, merged Oct 19-20). Sessions 3-5 all live here; not merged to `main`. Latest commit `f397709`; **session 5's work (section 13) is uncommitted**. |
 | Commits on `web-app` | `5e55c5d` web app + hosted-API model layer + "Explain this" · `f7c1242` project guide · `288e193` topic book, book reader, measured model comparison |
-| Uncommitted | **Session 3's frontend redesign** (section 11). Session 2's work below was committed as `a8ad2ca`. Older note: everything from session 2 (section 10 below): Notes level, dockey→donkey, `.cache/` layout, past papers, bake-off images, migration 002, plus the `.env.example` typo fix. `.vscode/` is the editor's folder, never committed. Commit only when asked. |
-| Running | Nothing. Local Supabase (Docker), dev server and worker are all stopped. |
-| Tests | `.venv/bin/pytest -q`: **84 pass** · `cd web && corepack pnpm@9.15.4 test`: **10 pass** · typecheck and `next build` pass |
+| Uncommitted | **Session 5 (section 13): chapter library, per-section level, notes.** 22 modified files plus new `003_library.sql`, `web/app/api/sections/`, `notes-panel`, `section-level-menu`, `my-notes`, `library.ts`, `rewrite-context.ts`, `write-prompts.generated.ts` and two test files (`git status`). `.vscode/` is the editor's folder, never committed. Commit only when asked (suggest: one commit on `frontend-redesign`, then ask about merging to `main`). |
+| Running | Nothing. Dev server, worker and the local Supabase containers were stopped on Oct 26 (docker volumes keep the local DB; `supabase start` brings it back). |
+| Tests | `.venv/bin/pytest -q`: **92 pass** · `cd web && corepack pnpm@9.15.4 test`: **20 pass** · typecheck and `next build` pass (all re-run at the end of session 5) |
 | Secrets | `OPENROUTER_API_KEY` is in `.env` (gitignored, mode 600). It was once pasted into the tracked `.env.example`, was moved, and was never committed. Spend so far: about **$0.17 of the key's $10 cap**, but the OpenRouter account has **$0 purchased credits** (free tier), so bursts of requests fail with 402 `in_flight_budget_exhausted` (see section 10). No Gemini key exists. Keys never go in `.env.example`. |
 
 ## 2. What was asked, in order, and what was built
@@ -58,6 +58,7 @@ Nine hard pages from three decks for readers; three sections of the Paging deck 
 - The `ollama_local` outline for long books may truncate (4,096-token cap); `fallback_outline` is the safety net.
 
 **Open work, roughly in priority order**
+0. **Session 5 follow-ups (most recent, see section 13):** commit; deploy migration `003_library.sql` (after 001, 002) and set `OPENROUTER_API_KEY` on Vercel; try the new flow on the user's real decks (Paging, NN) and watch chapters arrive one by one; verify "Explain this" with `chapter_id` live; stream the section rewrite; phone layout of the notes sheet; print with several chapters; an "owned library" view/admin page listing `chapters`; decide what to do with old per-notebook data (`documents`, `outputs` bucket, not migrated); CLI `s2m library` has only been smoke-tested.
 1. Close the reading-error blind spot: stop the writer repeating exact numeric or positional detail from a figure description unless it's in the slide text, and/or cross-read number-heavy slides with a second model and flag disagreements.
 2. Both writers overshoot the length budget even after the tighten pass (the user prefers short notes).
 3. Deployment: hosted Supabase (run `001_init.sql`, enable anonymous sign-ins), Vercel (root dir `web`), a worker host; later Google sign-in linked to the anonymous user, durable cache mirroring to Storage, a slide pane that follows scrolling.
@@ -178,3 +179,43 @@ The user wants to work on the frontend (`web/`) next. Read `CLAUDE.md` "Web app"
 **Local leftovers (safe to delete):** `data/web/nn-test`, `nn-test2`, `nn-api`, `nn-minimax`, `web/public/demo-nn-api`, `web/public/demo-nn-minimax`. The user's own `data/chapters/nn` (old chapter-style, Oct 9) was not touched.
 
 **Open next.** 1) Settle MiniMax vs API with the slide-image check. 2) Decide whether `minimax_free` joins a chain. 3) The topic-title artefacts "(part 1)/(part 2)" in the API run. 4) Frontend list in section 11 still stands (font choice, quiz/Explain/mobile review, Studio card ready state). 5) The Nielsen chapters 3-4 (about 280 pages) were not converted this session.
+
+
+## 13. Session 5 (Oct 22, 2026): chapter-by-chapter book, shared chapter library, per-section level, notes
+
+**Asked:** (1) show the book chapter by chapter while work continues in the background; (2) cache generated chapters, never regenerate ones that exist, a way to check what's generated, named chapter-wise so many users can share; (3) per-section "enhance": a learner-style rewrite for one section and a proficient one for another, hosted on OpenRouter, separate from "Explain this"; (4) a notes section where the user types their own thoughts. **Decisions (user's answers):** chapter = one PDF; cache shared across all users; the rewrite replaces the section in place and is saved; it runs on a Vercel route (not the worker); notes are per section, synced to Supabase.
+
+**Built (uncommitted on `frontend-redesign`).**
+- `supabase/migrations/003_library.sql`: `chapters` (sha-unique, slug), `chapter_docs`, `section_variants` (shared rewrites), `section_choices` (per notebook), `user_notes`, `explain_requests.chapter_id`, `sources.sha/chapter_id`, `jobs.chapter_id/chapters_*`, `claim_chapter()`, bucket `library`, `owns_chapter()` RLS helper, realtime. The old `documents` table / `outputs` bucket are no longer written.
+- Worker (`backend/worker.py`): per-PDF flow (`ensure_chapter`, `missing_levels`, `build_chapter`, `upload_chapter`), publishes each chapter as soon as it is written, `LibraryChapter` dir `data/web/library/<slug>`, one failed chapter doesn't stop the rest, explain reads from the library and splices the notebook's section choice (`explain.replace_section`). New `s2m library [--missing]`.
+- Web: `/api/sources` hashes the stored PDF and registers the chapter; `/api/jobs` returns `{ready:true}` (and marks the notebook ready) when nothing is missing; `/api/sections/rewrite` (OpenRouter DeepSeek, cached, 20/h quota); `/api/explain` is chapter-aware. `lib/book.ts` `parseLibraryBook`, rewritten `reader.tsx` (cover → chapter covers → topics, chapter nav, Level menu, Notes button), `notes-panel.tsx`, `section-level-menu.tsx`, `my-notes.tsx`, Studio cards show "2 of 5 chapters" + a My notes card, `rewrite-context.ts` + `write-prompts.generated.ts` (synced from `backend/prompts`, tested).
+
+**Verified.** pytest 92 pass; web typecheck, 20 tests, `next build` pass. Migrations applied to a scratch Postgres and to the real local Supabase (`supabase db reset`); RLS checked (users can't see/write each other's chapters, notes or choices; `claim_chapter` claim/requeue/stale takeover). **Live end to end** (local Supabase, real Next routes, hosted models, scratch `S2M_DATA`): two synthetic PDFs → both chapters published, job $0.0094; a second anonymous user uploading the same PDF got the same chapter, `{ready:true}`, no job; rewrite of one section (8 s, $0.0005) was saved per notebook, shared (second notebook's identical choice was a cache hit), rejected for foreign chapters and bad levels, and reset worked; notes upsert/edit/delete under RLS. **Playwright** (scratchpad, `playwright-core` + system Chrome): cover with both chapters, notes autosave to the DB, the panel follows the topic and restores text, Level → Revision changes only that topic and survives a reload, My notes lists the note.
+
+**Not verified.** "Explain this" with `chapter_id` against live services (local model / Gemini cloud path; only unit-tested), the progressive "Writing… / Waiting" placeholders watched live while a second chapter is still generating (logic and Realtime wiring are in; the live run finished too fast to observe), phone layout of the notes bottom sheet, print with several chapters, a hosted Supabase/Vercel deployment, the rewrite on real (not synthetic) slides, and the old per-notebook data (needs a re-upload; nothing migrated). The rewrite is one JSON response, not streamed. Source `pages` for PDFs registered before the first conversion stays empty until a worker has seen them.
+
+**Local leftovers.** Local Supabase was started with a CLI downloaded to the session scratchpad and then stopped. `web/.env.local` now also has `OPENROUTER_API_KEY` (gitignored). Test notebooks live only in the local Supabase DB.
+
+### How to resume the web app (live stack, Oct 2026 recipe that worked)
+```bash
+cd /home/aarrush/personal/projects/slides_to_markdown
+# 1. Supabase CLI is NOT installed and the old scratchpad copy is gone: download it (campus network allowed it)
+mkdir -p $SCRATCH/sb/bin && curl -sSL -o $SCRATCH/sb/s.tgz https://github.com/supabase/cli/releases/latest/download/supabase_linux_amd64.tar.gz \
+  && tar -xzf $SCRATCH/sb/s.tgz -C $SCRATCH/sb/bin
+$SCRATCH/sb/bin/supabase start          # images are already pulled; "starting from backup" restores the old local DB
+$SCRATCH/sb/bin/supabase db reset       # applies 001-003 (wipes the local test data; needed once after the schema changed)
+# 2. web: web/.env.local needs NEXT_PUBLIC_SUPABASE_URL/ANON_KEY, SUPABASE_SERVICE_ROLE_KEY, ADMIN_TOKEN, OPENROUTER_API_KEY (all gitignored)
+cd web && corepack pnpm@9.15.4 dev -p 3111
+# 3. worker (hosted models; spend caps from .env)
+SUPABASE_URL=http://127.0.0.1:54321 SUPABASE_SERVICE_KEY=<service key> .venv/bin/s2m worker
+```
+Open `http://localhost:3111`. Each browser/profile is a separate anonymous user, so a *private window* is a quick way to test cross-user reuse. Demo without any backend: `/notebooks/demo?view=learner`.
+
+**The live checks I ran (scratchpad scripts, lost; recreate if needed).** (a) `e2e.py`: signs up anonymous users through `POST {supabase}/auth/v1/signup` (body `{}`), creates a notebook via `/api/notebooks`, uploads with `/api/uploads` (signed URL, `PUT .../storage/v1/object/upload/sign/pdfs/<path>?token=`), registers with `/api/sources`, queues with `/api/jobs`, then `/api/sections/rewrite` and PostgREST `user_notes` with the user's JWT. (b) Playwright: `playwright-core` installed with `corepack pnpm add` in a scratch dir, `executablePath: /usr/bin/google-chrome`, session injected with `localStorage.setItem("sb-127-auth-token", JSON.stringify(session))` (key is `sb-<first label of the host>-auth-token`), driving cover → Start reading → Notes → Level → My notes. Two 1-page synthetic PDFs (pymupdf text slides) were enough; whole run cost about $0.01.
+
+**Traps found this session.**
+- `next build` while a `next dev` is running corrupts `.next` (dev then fails with "Cannot find module './vendor-chunks/...'"): stop dev, `rm -rf web/.next`, restart.
+- `kill`ing with a pattern that also appears in the shell's own command line kills the shell (exit 144). Use `ps -eo pid,comm | awk '$2 ~ /^next/ {print $1}'` for the dev server and `ps -eo pid,args | grep "[b]in/s2m"` for the worker, and never put the pattern text in the same command line.
+- `LibraryChapter.root` default is bound at class definition, so tests can't monkeypatch the module global through the dataclass default; the worker passes `root=LIBRARY_DIR` explicitly.
+- A scratch Postgres needs `alter default privileges in schema public grant all on tables to anon, authenticated, service_role` to mimic Supabase when testing RLS (otherwise "permission denied").
+- Migration 003 was validated on a plain `postgres:16-alpine` with stub `auth`/`storage` schemas, and on the real local Supabase via `db reset`.

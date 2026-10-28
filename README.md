@@ -160,13 +160,28 @@ Profile `qwen_deepseek` is Qwen3.5-35B reading and DeepSeek V3.2 writing, both o
 A NotebookLM-style site (`web/`, Next.js on Vercel): drop PDFs, read the summary first, then learner notes, revision
 sheet, explain-simply version and a quiz; highlight any text or click a figure to have it explained.
 
-**One book per notebook.** Every PDF in a notebook is merged into a single document with **no chapters**: the model groups
-all the slides by *topic* (merging repeats across PDFs, about one section per 5 slides, titled like a textbook section).
-The reader shows it as a **book**: a cover with the overview, key takeaways and a numbered table of contents, then one
-page per topic with Previous/Next cards, ← → keys, a progress bar, checkmarks for topics you've read, and your place
-remembered. A **Scroll** toggle gives one continuous page instead, and Print always prints every topic. The CLI keeps its
-chapter-wise default; `--by-topic` produces the same flat topic layout. `s2m worker --layout chapters` brings back
-chapters for the web app.
+**One chapter per PDF.** A notebook is a list of chapters, one for each PDF you add. Each chapter is a **book of topics**:
+the model groups its slides by *topic* (about one section per 5 slides, titled like a textbook section). The reader shows a
+cover with the chapters, then each chapter's cover and one page per topic, with Previous/Next cards, ← → keys, a progress
+bar, checkmarks for topics you've read, and your place remembered. A **Scroll** toggle gives one continuous page, and Print
+always prints every topic. **Chapters appear as soon as they are written**: with several PDFs you can read chapter 1 while
+chapter 2 is still being generated (the others show "Writing…" or "Waiting"). The CLI keeps its chapter-wise default;
+`s2m worker --layout chapters` uses the CLI's chapter detection inside each PDF.
+
+**Shared chapter library.** A chapter is identified by its PDF's content hash (computed server-side), so a PDF anyone has
+already converted is never converted, or paid for, again: the new notebook links to the existing chapter and it is ready
+at once, even if it was made by another user. Generated files live in the `library` bucket under the chapter's name
+(`<title>-<hash>/…`). The *Study tools* cards show "2 of 5 chapters" when only some chapters have a level, and a job only
+generates what is missing. `s2m library [--missing]` lists which chapters and levels exist.
+
+**Per-section level.** Each topic has a **Level** menu (Learner / Revision / Explain simply). It rewrites only that topic
+through OpenRouter (DeepSeek V3.2, from the web server, so it works while the worker is off) and keeps your choice for the
+notebook; "Back to the default" undoes it. Rewrites are cached per chapter and shared; if the chapter already has a full
+doc at that level, the section is copied from it at no cost. Limited to 20 new rewrites per hour per user.
+
+**My notes.** The **Notes** button on each topic opens a panel (side column on wide screens, bottom sheet on phones) where
+you write your own thoughts, saved automatically to your account per topic. The *My notes* card lists everything you wrote,
+grouped by chapter, with jump links and a `.md` download.
 
 ```
 Browser ─► Vercel (web/: UI + short API routes) ─► Supabase (Postgres, Storage, Realtime)
@@ -175,16 +190,18 @@ Browser ─► Vercel (web/: UI + short API routes) ─► Supabase (Postgres, S
 ```
 - **No sign-in yet:** each browser gets an anonymous Supabase user; row-level security keeps its notebooks private.
   Quotas (`web/lib/limits.ts`) plus the worker's spend caps bound abuse.
-- **Worker:** `s2m worker` claims queued jobs (`claim_job`), runs `convert_chapter` (learner + summary first; other
-  levels on demand), and uploads `<level>.md`, `assets/`, slide images, `extracts.json` and `quiz.json` (parsed from the
-  learner doc). It also answers "Explain this" requests with the local model, streaming into the row. Local work lives in
-  `data/web/notebooks/<id>/`, never `data/chapters/`.
+- **Worker:** `s2m worker` claims queued jobs (`claim_job`) and, for each PDF of the notebook in order, claims the chapter
+  (`claim_chapter`, so two jobs never write the same one), runs `convert_chapter` for the levels it lacks (learner + summary
+  first; other levels on demand) and publishes it to the `library` bucket (`<level>.md`, `assets/`, slide images,
+  `extracts.json`, `quiz.json` parsed from the learner doc) as soon as it is done. A failed chapter doesn't stop the others.
+  It also answers "Explain this" requests with the local model, streaming into the row. Local work lives in
+  `data/web/library/<chapter>/` (shared by every notebook) and `data/web/notebooks/<id>/pdfs/`, never `data/chapters/`.
 - **Explain this:** local model first (free, a few seconds); if the worker is offline or busy, the API route answers
   with Gemini directly. Same prompt either way (`backend/prompts/explain.md`, synced into `web/` by `pnpm sync-prompt`).
 
 **Setup**
-1. Supabase project → SQL editor → run `supabase/migrations/001_init.sql`; Authentication → enable **Anonymous sign-ins**.
-2. Vercel → import the repo, **Root Directory = `web`**, env vars from `web/.env.example`.
+1. Supabase project → SQL editor → run `supabase/migrations/001_init.sql`, `002_notes_donkey.sql` and `003_library.sql` in order; Authentication → enable **Anonymous sign-ins**.
+2. Vercel → import the repo, **Root Directory = `web`**, env vars from `web/.env.example` (`OPENROUTER_API_KEY` is for the per-section rewrites).
 3. Worker: copy `.env.example` to `.env` (API keys, caps, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`), keep Ollama running
    with `qwen3.5:latest` (`OLLAMA_KEEP_ALIVE=30m`), then `.venv/bin/s2m worker` in tmux.
 
@@ -193,4 +210,4 @@ Browser ─► Vercel (web/: UI + short API routes) ─► Supabase (Postgres, S
 
 ## Tests
 `.venv/bin/pytest -q`. These run offline: they use synthetic PDFs, a fake LLM and an in-memory Supabase.
-`cd web && pnpm test` checks the doc-splitting helpers shared with the worker.
+`cd web && pnpm test` checks the doc-splitting, multi-chapter book and rewrite-prompt helpers shared with the worker.
